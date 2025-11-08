@@ -10,7 +10,7 @@ from qwen_omni_utils import process_mm_info
 
 MODEL_ID = "Qwen/Qwen2.5-Omni-3B"
 USE_AUDIO_IN_VIDEO = True
-USE_TALKER = False  # Set to False to disable audio generation (faster, text-only)
+USE_TALKER = True  # Set to False to disable audio generation (faster, text-only)
 
 # 1) Load the whole model on a single GPU; avoid sharding
 model = Qwen2_5OmniForConditionalGeneration.from_pretrained(

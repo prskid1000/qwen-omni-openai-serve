@@ -32,18 +32,19 @@ def omni_chat(
     video_file,
     max_tokens: int,
     temperature: float,
-    top_p: float
+    top_p: float,
+    return_audio: bool
 ):
     """Send multimodal chat request to Omni server"""
     
     # Check server status first
     is_healthy, health_data = check_server_status()
     if not is_healthy:
-        return "❌ Cannot connect to Omni server. Make sure it's running at " + SERVER_URL + "\n\nStart it with: python -m app.main"
+        return "❌ Cannot connect to Omni server. Make sure it's running at " + SERVER_URL + "\n\nStart it with: python -m app.main", None
     
     # Validate inputs
     if not text or not text.strip():
-        return "⚠️ Please enter a text prompt"
+        return "⚠️ Please enter a text prompt", None
     
     try:
         # Prepare form data
@@ -53,7 +54,7 @@ def omni_chat(
             "max_tokens": max_tokens,
             "temperature": temperature,
             "top_p": top_p,
-            "return_audio": False  # Text output only
+            "response_format_type": "audio" if return_audio else "text"  # OpenAI-compatible format
         }
         
         # Add file uploads if provided
@@ -85,32 +86,40 @@ def omni_chat(
                 error_msg = error_json.get("detail", error_msg)
             except:
                 pass
-            return f"❌ Error {response.status_code}: {error_msg}"
+            return f"❌ Error {response.status_code}: {error_msg}", None
         
         # Parse response
         result = response.json()
         
-        # Extract text response
+        # Extract text response and audio (OpenAI format)
         if "choices" in result and len(result["choices"]) > 0:
             message = result["choices"][0].get("message", {})
-            content = message.get("content", "")
+            text_response = message.get("content", "")
+            
+            # Extract audio from OpenAI format: message.audio.data
+            audio_data_url = None
+            if "audio" in message:
+                audio_data = message["audio"].get("data")
+                if audio_data:
+                    audio_data_url = f"data:audio/wav;base64,{audio_data}"
             
             # Add usage info if available
             usage = result.get("usage", {})
             if usage:
                 usage_info = f"\n\n---\n📊 Usage: {usage.get('prompt_tokens', 0)} prompt tokens, {usage.get('completion_tokens', 0)} completion tokens, {usage.get('total_tokens', 0)} total"
-                content += usage_info
+                text_response += usage_info
             
-            return content
+            # Return tuple: (text, audio_data_url)
+            return text_response, audio_data_url
         else:
-            return "⚠️ No response generated"
+            return "⚠️ No response generated", None
             
     except requests.exceptions.Timeout:
-        return "⏱️ Request timed out. The model may be processing a large input. Please try again."
+        return "⏱️ Request timed out. The model may be processing a large input. Please try again.", None
     except requests.exceptions.ConnectionError:
-        return f"❌ Connection Error: Cannot connect to server at {SERVER_URL}\n\nMake sure the Omni server is running:\npython -m app.main"
+        return f"❌ Connection Error: Cannot connect to server at {SERVER_URL}\n\nMake sure the Omni server is running:\npython -m app.main", None
     except Exception as e:
-        return f"❌ Error: {str(e)}"
+        return f"❌ Error: {str(e)}", None
 
 
 def create_interface():
@@ -130,7 +139,7 @@ def create_interface():
     
     with gr.Blocks(title="Qwen2.5-Omni Multimodal Chat", theme=gr.themes.Soft()) as app:
         gr.Markdown("# 🎯 Qwen2.5-Omni Multimodal Chat")
-        gr.Markdown("Chat with Qwen2.5-Omni using text, audio, images, and video inputs.")
+        gr.Markdown("Chat with Qwen2.5-Omni using text, audio, images, and video inputs. **OpenAI-compatible API** with audio output support.")
         
         # Server status
         with gr.Row():
@@ -209,6 +218,13 @@ def create_interface():
                         label="Top-p"
                     )
                 
+                # Audio output toggle (OpenAI-compatible: response_format)
+                return_audio = gr.Checkbox(
+                    label="🎵 Generate Audio Output",
+                    value=False,
+                    info="Uses OpenAI-compatible response_format={'type': 'audio'}. Model will reload when switching modes."
+                )
+                
                 send_btn = gr.Button("🚀 Send", variant="primary", size="lg")
                 clear_btn = gr.Button("🗑️ Clear", variant="secondary")
             
@@ -216,22 +232,59 @@ def create_interface():
                 gr.Markdown("### 📤 Output")
                 
                 output_text = gr.Textbox(
-                    label="Response",
-                    lines=20,
+                    label="Text Response",
+                    lines=15,
                     interactive=False,
                     placeholder="Response will appear here..."
                 )
+                
+                # Audio output player
+                output_audio = gr.Audio(
+                    label="Audio Response (if generated)",
+                    type="filepath",
+                    visible=True,
+                    autoplay=True
+                )
         
         # Button actions
+        def handle_chat_response(text, audio_file, image_file, video_file, max_tokens, temperature, top_p, return_audio):
+            """Handle chat response and extract audio"""
+            text_result, audio_url = omni_chat(
+                text, audio_file, image_file, video_file, max_tokens, temperature, top_p, return_audio
+            )
+            
+            # Save audio to temp file if present
+            audio_file_path = None
+            if audio_url:
+                try:
+                    import base64
+                    import tempfile
+                    import os
+                    
+                    # Extract base64 from data URL
+                    if audio_url.startswith("data:audio/wav;base64,"):
+                        audio_base64 = audio_url.split(",", 1)[1]
+                        audio_bytes = base64.b64decode(audio_base64)
+                        
+                        # Save to temp file
+                        temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+                        temp_audio.write(audio_bytes)
+                        temp_audio.close()
+                        audio_file_path = temp_audio.name
+                except Exception as e:
+                    print(f"⚠️ Failed to save audio: {e}")
+            
+            return text_result, audio_file_path
+        
         send_btn.click(
-            fn=omni_chat,
-            inputs=[text_input, audio_input, image_input, video_input, max_tokens, temperature, top_p],
-            outputs=output_text
+            fn=handle_chat_response,
+            inputs=[text_input, audio_input, image_input, video_input, max_tokens, temperature, top_p, return_audio],
+            outputs=[output_text, output_audio]
         )
         
         clear_btn.click(
-            fn=lambda: ("", None, None, None, 512, 0.7, 0.9, ""),
-            outputs=[text_input, audio_input, image_input, video_input, max_tokens, temperature, top_p, output_text]
+            fn=lambda: ("", None, None, None, 512, 0.7, 0.9, False, "", None),
+            outputs=[text_input, audio_input, image_input, video_input, max_tokens, temperature, top_p, return_audio, output_text, output_audio]
         )
         
         gr.Markdown("---")
@@ -244,7 +297,11 @@ def create_interface():
           - Audio: WAV, MP3, FLAC, etc.
           - Image: PNG, JPG, JPEG, etc.
           - Video: MP4, AVI, MOV, etc.
-        - **Output**: Text only (audio output is disabled by default)
+        - **Output**: Text and optional audio (enable "Generate Audio Output" checkbox)
+          - When audio is enabled, response includes both `message.content` (text) and `message.audio.data` (base64 audio)
+          - Uses OpenAI-compatible format: `response_format={"type": "audio"}`
+        - **Audio Mode**: Model will automatically reload when switching between text-only and audio modes
+        - **API**: OpenAI-compatible - Use `response_format={"type": "audio"}` to request audio output
         - **Server**: Make sure the Omni server is running on port 8665
         """)
     

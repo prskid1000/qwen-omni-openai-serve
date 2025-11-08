@@ -44,13 +44,22 @@ async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
     if last_message.role != "user":
         raise HTTPException(status_code=400, detail="Last message must be from user")
     
+    # Determine if audio is requested (OpenAI-compatible: response_format)
+    wants_audio = False
+    if request.response_format and request.response_format.type == "audio":
+        wants_audio = True
+    
     print(f"📨 Omni Chat: text_len={len(last_message.content)}, "
           f"audio={bool(last_message.audio_path)}, "
           f"image={bool(last_message.image_path)}, "
           f"video={bool(last_message.video_path)}, "
-          f"return_audio={request.return_audio}")
+          f"response_format={request.response_format.type if request.response_format else 'text'}, "
+          f"wants_audio={wants_audio}")
     
     try:
+        # Reload model if switching between audio/text modes
+        omni_manager.reload_model_if_needed(wants_audio)
+        
         # Generate response
         response_text, audio_tensor = omni_manager.generate_response(
             text_prompt=last_message.content,
@@ -58,13 +67,14 @@ async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
             image_path=last_message.image_path,
             video_path=last_message.video_path,
             max_new_tokens=request.max_tokens,
-            return_audio=request.return_audio,
+            return_audio=wants_audio,
             temperature=request.temperature,
             top_p=request.top_p
         )
         
         # Encode audio if present
         audio_base64 = None
+        
         if audio_tensor is not None:
             try:
                 import soundfile as sf
@@ -77,7 +87,9 @@ async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
                 audio_buffer = io.BytesIO()
                 sf.write(audio_buffer, audio_np.reshape(-1, 1), 24000, format='WAV', subtype='PCM_16')
                 audio_buffer.seek(0)
-                audio_base64 = base64.b64encode(audio_buffer.read()).decode('utf-8')
+                audio_bytes = audio_buffer.read()
+                audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+                
                 print(f"✅ Audio generated: {len(audio_base64)} bytes (base64)")
             except Exception as e:
                 print(f"⚠️  Failed to encode audio: {e}")
@@ -86,15 +98,25 @@ async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
         prompt_tokens = len(last_message.content.split())
         completion_tokens = len(response_text.split())
         
+        # Build message according to OpenAI format
+        message = {
+            "role": "assistant",
+            "content": response_text
+        }
+        
+        # If audio is present, add it in OpenAI format: message.audio.data
+        if audio_base64:
+            message["audio"] = {
+                "data": audio_base64,
+                "format": "wav"
+            }
+        
         return OmniChatResponse(
             id=f"omni-{uuid.uuid4().hex[:8]}",
             model=omni_manager.model_name,
             choices=[{
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": response_text
-                },
+                "message": message,
                 "finish_reason": "stop"
             }],
             usage={
@@ -102,7 +124,7 @@ async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens
             },
-            audio_base64=audio_base64
+            audio_base64=audio_base64  # Keep for backward compatibility
         )
         
     except Exception as e:
@@ -118,20 +140,27 @@ async def omni_chat_with_upload(
     max_tokens: int = Form(512),
     temperature: float = Form(0.7),
     top_p: float = Form(0.9),
-    return_audio: bool = Form(False)
+    response_format_type: Optional[str] = Form(None, description="Response format type: 'text' or 'audio'")
 ) -> OmniChatResponse:
     """Create chat completion with file uploads (multimodal)"""
     
     if not omni_manager:
         raise HTTPException(status_code=500, detail="Omni model not loaded")
     
+    # Determine if audio is requested (OpenAI-compatible: response_format_type)
+    wants_audio = response_format_type == "audio"
+    
     print(f"📨 Omni Chat (Upload): text_len={len(text)}, "
           f"audio={audio is not None}, "
           f"image={image is not None}, "
           f"video={video is not None}, "
-          f"return_audio={return_audio}")
+          f"response_format={response_format_type or 'text'}, "
+          f"wants_audio={wants_audio}")
     
     # Save uploaded files temporarily
+    # Reload model if switching between audio/text modes
+    omni_manager.reload_model_if_needed(wants_audio)
+    
     temp_files = []
     audio_path = None
     image_path = None
@@ -169,13 +198,14 @@ async def omni_chat_with_upload(
             image_path=image_path,
             video_path=video_path,
             max_new_tokens=max_tokens,
-            return_audio=return_audio,
+            return_audio=wants_audio,
             temperature=temperature,
             top_p=top_p
         )
         
         # Encode audio if present
         audio_base64 = None
+        
         if audio_tensor is not None:
             try:
                 import soundfile as sf
@@ -185,7 +215,9 @@ async def omni_chat_with_upload(
                 audio_buffer = io.BytesIO()
                 sf.write(audio_buffer, audio_np.reshape(-1, 1), 24000, format='WAV', subtype='PCM_16')
                 audio_buffer.seek(0)
-                audio_base64 = base64.b64encode(audio_buffer.read()).decode('utf-8')
+                audio_bytes = audio_buffer.read()
+                audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+                
                 print(f"✅ Audio generated: {len(audio_base64)} bytes (base64)")
             except Exception as e:
                 print(f"⚠️  Failed to encode audio: {e}")
@@ -194,23 +226,32 @@ async def omni_chat_with_upload(
         prompt_tokens = len(text.split())
         completion_tokens = len(response_text.split())
         
+        # Build message according to OpenAI format
+        message = {
+            "role": "assistant",
+            "content": response_text
+        }
+        
+        # If audio is present, add it in OpenAI format: message.audio.data
+        if audio_base64:
+            message["audio"] = {
+                "data": audio_base64,
+                "format": "wav"
+            }
+        
         return OmniChatResponse(
             id=f"omni-{uuid.uuid4().hex[:8]}",
             model=omni_manager.model_name,
             choices=[{
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": response_text
-                },
+                "message": message,
                 "finish_reason": "stop"
             }],
             usage={
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens
-            },
-            audio_base64=audio_base64
+            }
         )
         
     except Exception as e:

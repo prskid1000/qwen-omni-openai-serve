@@ -16,22 +16,29 @@ class OmniChatMessage(BaseModel):
     video_path: Optional[str] = None
 
 
+class ResponseFormat(BaseModel):
+    """OpenAI-compatible response format"""
+    type: str = Field(default="text", description="Response format type: 'text' or 'audio'")
+
 class OmniChatRequest(BaseModel):
-    """Request for Omni chat completion"""
+    """Request for Omni chat completion (OpenAI-compatible)"""
     messages: List[OmniChatMessage]
     max_tokens: int = Field(default=512, ge=1, le=4096)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     top_p: float = Field(default=0.9, ge=0.0, le=1.0)
-    return_audio: bool = Field(default=False, description="Generate audio output (requires talker to be enabled)")
+    response_format: Optional[ResponseFormat] = Field(default=None, description="OpenAI-compatible response format: {'type': 'text'} or {'type': 'audio'}")
 
 
 class OmniChatResponse(BaseModel):
-    """Response from Omni chat completion"""
+    """Response from Omni chat completion (OpenAI-compatible format)"""
     id: str
     model: str
-    choices: List[Dict[str, Any]]  # Contains text response
+    choices: List[Dict[str, Any]]  # Contains text/audio response in OpenAI format (message.audio.data for audio)
     usage: Dict[str, int]
-    audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio (only if return_audio=True and talker enabled)")
+    
+    class Config:
+        # Allow extra fields for OpenAI compatibility
+        extra = "allow"
 
 
 class OmniHealthResponse(BaseModel):

@@ -39,29 +39,23 @@ class OmniModelManager:
         self.use_flash_attention = use_flash_attention
         self.talker_enabled = False
         self.context_length = None
+        self.current_audio_mode = None  # Track current mode: True for audio, False for text-only
         
     def load_model(self):
         """Load Qwen2.5-Omni model with proper device handling"""
         print(f"Loading model: {self.model_name}")
         
-        # Prepare model loading kwargs
+        # Prepare model loading kwargs - use simpler approach: avoid sharding
         model_kwargs = {
             "torch_dtype": torch.float16,
-            "device_map": "auto"
+            "device_map": None,  # Don't auto-shard, we'll move manually
+            "low_cpu_mem_usage": True
         }
         
         # Add flash attention if requested
         if self.use_flash_attention:
             model_kwargs["attn_implementation"] = "flash_attention_2"
-            print("Using flash_attention_2 (talker will be disabled to avoid conflicts)")
-        
-        # Add CPU offload settings if requested
-        if self.use_cpu_offload and self.max_memory:
-            print(f"Using CPU/GPU split with memory config: {self.max_memory}")
-            model_kwargs["max_memory"] = self.max_memory
-            model_kwargs["offload_folder"] = "offload"
-        else:
-            print("Loading model on GPU (or CPU if no GPU available)...")
+            print("Using flash_attention_2")
         
         # Load the model
         self.model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
@@ -69,55 +63,20 @@ class OmniModelManager:
             **model_kwargs
         )
         
+        # Move model to device (GPU if available, else CPU)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = self.model.to(device)
+        self.model.eval()  # Set to evaluation mode for faster inference
+        print(f"Model moved to {device}")
+        
         # Handle talker: disable by default to avoid meta tensor errors
-        talker_disabled = False
+        # (can be enabled later if return_audio=True is used)
         if hasattr(self.model, 'disable_talker'):
             try:
                 self.model.disable_talker()
-                talker_disabled = True
-                print("✓ Talker disabled (avoids meta tensor errors, no audio output)")
+                print("✓ Talker disabled (can enable if return_audio=True)")
             except Exception as e:
                 print(f"Warning: Could not disable talker: {e}")
-        
-        # Additional safety: Check if talker is in meta state and patch generate() if needed
-        if hasattr(self.model, 'talker'):
-            try:
-                has_meta = any(p.is_meta for p in self.model.talker.parameters())
-                if has_meta or not talker_disabled:
-                    print("Warning: Talker may cause issues, patching generate() to handle it safely")
-                    original_generate = self.model.generate
-                    
-                    def safe_generate(*args, return_audio=False, **kwargs):
-                        if not return_audio:
-                            talker_backup = getattr(self.model, 'talker', None)
-                            try:
-                                class DummyTalker:
-                                    def generate(self, *args, **kwargs):
-                                        return None
-                                    def __getattr__(self, name):
-                                        return lambda *args, **kwargs: None
-                                
-                                self.model.talker = DummyTalker()
-                                result = original_generate(*args, return_audio=False, **kwargs)
-                                return result
-                            except Exception as e:
-                                if hasattr(self.model, 'talker'):
-                                    delattr(self.model, 'talker')
-                                try:
-                                    result = original_generate(*args, return_audio=False, **kwargs)
-                                    return result
-                                finally:
-                                    if talker_backup is not None:
-                                        self.model.talker = talker_backup
-                            finally:
-                                if talker_backup is not None and hasattr(self.model, 'talker'):
-                                    self.model.talker = talker_backup
-                        else:
-                            return original_generate(*args, return_audio=True, **kwargs)
-                    
-                    self.model.generate = safe_generate
-            except Exception as e:
-                print(f"Warning: Could not patch talker: {e}")
         
         # Load processor
         self.processor = Qwen2_5OmniProcessor.from_pretrained(self.model_name)
@@ -135,23 +94,38 @@ class OmniModelManager:
             elif hasattr(config, 'context_length'):
                 self.context_length = config.context_length
         
-        # Print device map
-        print("\n=== Model Device Map ===")
-        if hasattr(self.model, 'hf_device_map'):
-            for name, device in list(self.model.hf_device_map.items())[:10]:
-                print(f"{name}: {device}")
-            if len(self.model.hf_device_map) > 10:
-                print(f"... ({len(self.model.hf_device_map)} total modules)")
-        else:
-            print("Device map not available")
-        
         # Print context length if available
         if self.context_length:
-            print(f"\n📏 Context Length: {self.context_length:,} tokens")
-        else:
-            print("\n⚠️  Context length not found in model config")
+            print(f"📏 Context Length: {self.context_length:,} tokens")
         
         print("✅ Model loaded successfully")
+    
+    def reload_model_if_needed(self, return_audio: bool):
+        """Reload model if switching between audio and text-only modes"""
+        if self.current_audio_mode is None:
+            # First load, set mode
+            self.current_audio_mode = return_audio
+            return False  # No reload needed
+        
+        if self.current_audio_mode != return_audio:
+            # Mode changed, need to reload
+            print(f"🔄 Mode changed: {'text-only' if self.current_audio_mode else 'audio'} -> {'audio' if return_audio else 'text-only'}")
+            print("🔄 Reloading model to switch modes...")
+            
+            # Clear current model
+            if self.model is not None:
+                del self.model
+                self.model = None
+            if self.processor is not None:
+                del self.processor
+                self.processor = None
+            
+            # Reload
+            self.load_model()
+            self.current_audio_mode = return_audio
+            return True  # Reloaded
+        
+        return False  # No reload needed
         
     def generate_response(
         self,
@@ -162,7 +136,9 @@ class OmniModelManager:
         max_new_tokens: int = 512,
         return_audio: bool = False,
         temperature: float = 0.7,
-        top_p: float = 0.9
+        top_p: float = 0.9,
+        use_audio_in_video: bool = True,
+        do_sample: bool = False
     ) -> Tuple[str, Optional[torch.Tensor]]:
         """
         Generate response from Qwen 2.5 Omni.
@@ -174,8 +150,10 @@ class OmniModelManager:
             video_path: Optional path to video file
             max_new_tokens: Maximum tokens to generate
             return_audio: Whether to return audio (requires talker to be enabled)
-            temperature: Sampling temperature
-            top_p: Top-p sampling parameter
+            temperature: Sampling temperature (used if do_sample=True)
+            top_p: Top-p sampling parameter (used if do_sample=True)
+            use_audio_in_video: Whether to use audio in video processing
+            do_sample: Whether to use sampling (False = greedy decoding, faster)
         
         Returns:
             If return_audio=True: (text_response, audio_tensor)
@@ -222,13 +200,12 @@ class OmniModelManager:
         
         # Process inputs using process_mm_info if available
         if HAS_OMNI_UTILS:
-            USE_AUDIO_IN_VIDEO = False
             text = self.processor.apply_chat_template(
                 conversation,
                 add_generation_prompt=True,
                 tokenize=False
             )
-            audios, images, videos = process_mm_info(conversation, use_audio_in_video=USE_AUDIO_IN_VIDEO)
+            audios, images, videos = process_mm_info(conversation, use_audio_in_video=use_audio_in_video)
             
             inputs = self.processor(
                 text=text,
@@ -237,7 +214,7 @@ class OmniModelManager:
                 videos=videos,
                 return_tensors="pt",
                 padding=True,
-                use_audio_in_video=USE_AUDIO_IN_VIDEO
+                use_audio_in_video=use_audio_in_video
             )
         else:
             # Fallback without process_mm_info
@@ -252,20 +229,29 @@ class OmniModelManager:
                 padding=True
             )
         
-        # Move inputs to model device
-        device = next(self.model.parameters()).device
-        inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
-                  for k, v in inputs.items()}
+        # Move all tensors to the same device/dtype as the model
+        # Note: input_ids and other integer tensors must stay as Long/Int, not float16
+        for k, v in list(inputs.items()):
+            if isinstance(v, torch.Tensor):
+                if v.dtype in (torch.long, torch.int, torch.int32, torch.int64):
+                    # Integer tensors (like input_ids) should only move to device, keep integer dtype
+                    inputs[k] = v.to(self.model.device)
+                else:
+                    # Float tensors can use model's dtype
+                    inputs[k] = v.to(self.model.device, dtype=self.model.dtype)
         
         # Generate response
         print(f"Generating response (return_audio={return_audio})...")
-        with torch.no_grad():
+        with torch.inference_mode():  # Faster inference, disables gradient computation
             if return_audio:
                 # Generate with audio output (requires talker to be enabled)
                 text_ids, audio = self.model.generate(
                     **inputs,
                     max_new_tokens=max_new_tokens,
-                    return_audio=True
+                    use_audio_in_video=use_audio_in_video,
+                    do_sample=do_sample,
+                    temperature=temperature if do_sample else None,
+                    top_p=top_p if do_sample else None
                 )
                 # Decode text
                 response_text = self.processor.batch_decode(
@@ -275,18 +261,28 @@ class OmniModelManager:
                 )[0]
                 return response_text, audio
             else:
-                # Generate text only
-                output = self.model.generate(
+                # Disable talker if not already disabled (saves VRAM)
+                if hasattr(self.model, 'disable_talker'):
+                    try:
+                        self.model.disable_talker()
+                    except Exception:
+                        pass  # Already disabled or can't disable
+                
+                # Generate text only (talker disabled)
+                text_ids = self.model.generate(
                     **inputs,
                     max_new_tokens=max_new_tokens,
-                    do_sample=True,
-                    temperature=temperature,
-                    top_p=top_p
+                    use_audio_in_video=use_audio_in_video,
+                    do_sample=do_sample,
+                    temperature=temperature if do_sample else None,
+                    top_p=top_p if do_sample else None,
+                    return_audio=False  # Disable audio generation
                 )
                 # Decode and return
                 response = self.processor.batch_decode(
-                    output[:, inputs['input_ids'].shape[1]:],
-                    skip_special_tokens=True
+                    text_ids,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False
                 )[0]
                 return response, None
 
