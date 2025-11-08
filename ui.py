@@ -122,7 +122,9 @@ def create_interface():
     if is_healthy:
         model_name = health_data.get("model_name", "Unknown")
         device = health_data.get("device", "Unknown")
-        status_message = f"✅ **Server Status**: Connected\n📚 **Model**: {model_name}\n🖥️ **Device**: {device}"
+        context_length = health_data.get("context_length")
+        context_info = f"\n📏 **Context Length**: {context_length:,} tokens" if context_length else ""
+        status_message = f"✅ **Server Status**: Connected\n📚 **Model**: {model_name}\n🖥️ **Device**: {device}{context_info}"
     else:
         status_message = f"⚠️ **Server Status**: Not connected\n\nPlease start the server:\n```bash\npython -m app.main\n```"
     
@@ -140,7 +142,9 @@ def create_interface():
             if is_healthy:
                 model_name = health_data.get("model_name", "Unknown")
                 device = health_data.get("device", "Unknown")
-                return f"✅ **Server Status**: Connected\n📚 **Model**: {model_name}\n🖥️ **Device**: {device}"
+                context_length = health_data.get("context_length")
+                context_info = f"\n📏 **Context Length**: {context_length:,} tokens" if context_length else ""
+                return f"✅ **Server Status**: Connected\n📚 **Model**: {model_name}\n🖥️ **Device**: {device}{context_info}"
             else:
                 return f"⚠️ **Server Status**: Not connected\n\nPlease start the server:\n```bash\npython -m app.main\n```"
         
@@ -228,57 +232,6 @@ def create_interface():
         clear_btn.click(
             fn=lambda: ("", None, None, None, 512, 0.7, 0.9, ""),
             outputs=[text_input, audio_input, image_input, video_input, max_tokens, temperature, top_p, output_text]
-        )
-        
-        # Examples
-        gr.Markdown("---")
-        gr.Markdown("### 💡 Examples")
-        
-        examples = [
-            [
-                "What do you see in this image?",
-                None,
-                None,
-                None,
-                512,
-                0.7,
-                0.9
-            ],
-            [
-                "Transcribe and summarize this audio.",
-                None,
-                None,
-                None,
-                512,
-                0.7,
-                0.9
-            ],
-            [
-                "Describe what happens in this video.",
-                None,
-                None,
-                None,
-                512,
-                0.7,
-                0.9
-            ],
-            [
-                "Explain quantum computing in simple terms.",
-                None,
-                None,
-                None,
-                512,
-                0.7,
-                0.9
-            ]
-        ]
-        
-        gr.Examples(
-            examples=examples,
-            inputs=[text_input, audio_input, image_input, video_input, max_tokens, temperature, top_p],
-            outputs=output_text,
-            fn=omni_chat,
-            cache_examples=False
         )
         
         gr.Markdown("---")

@@ -99,7 +99,8 @@ async def health() -> OmniHealthResponse:
             status="healthy",
             model_loaded=True,
             model_name=omni_manager.model_name,
-            device=str(device)
+            device=str(device),
+            context_length=omni_manager.context_length
         )
     else:
         return OmniHealthResponse(

@@ -38,6 +38,7 @@ class OmniModelManager:
         self.max_memory = max_memory
         self.use_flash_attention = use_flash_attention
         self.talker_enabled = False
+        self.context_length = None
         
     def load_model(self):
         """Load Qwen2.5-Omni model with proper device handling"""
@@ -121,6 +122,19 @@ class OmniModelManager:
         # Load processor
         self.processor = Qwen2_5OmniProcessor.from_pretrained(self.model_name)
         
+        # Get context length from model config
+        if hasattr(self.model, 'config'):
+            config = self.model.config
+            # Try different common attribute names for context length
+            if hasattr(config, 'max_position_embeddings'):
+                self.context_length = config.max_position_embeddings
+            elif hasattr(config, 'max_seq_length'):
+                self.context_length = config.max_seq_length
+            elif hasattr(config, 'n_positions'):
+                self.context_length = config.n_positions
+            elif hasattr(config, 'context_length'):
+                self.context_length = config.context_length
+        
         # Print device map
         print("\n=== Model Device Map ===")
         if hasattr(self.model, 'hf_device_map'):
@@ -130,6 +144,12 @@ class OmniModelManager:
                 print(f"... ({len(self.model.hf_device_map)} total modules)")
         else:
             print("Device map not available")
+        
+        # Print context length if available
+        if self.context_length:
+            print(f"\n📏 Context Length: {self.context_length:,} tokens")
+        else:
+            print("\n⚠️  Context length not found in model config")
         
         print("✅ Model loaded successfully")
         

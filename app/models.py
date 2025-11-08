@@ -40,4 +40,5 @@ class OmniHealthResponse(BaseModel):
     model_loaded: bool
     model_name: Optional[str] = None
     device: Optional[str] = None
+    context_length: Optional[int] = None
 
