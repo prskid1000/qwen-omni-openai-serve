@@ -1,0 +1,28 @@
+# Core dependencies for Qwen2.5-Omni Server
+gradio
+transformers==4.52.3
+accelerate
+qwen-omni-utils[decord]
+
+# FastAPI server dependencies
+fastapi
+uvicorn[standard]
+
+# HTTP client for UI
+requests
+
+# PyTorch (required for transformers and Qwen2.5-Omni)
+torch
+
+# Audio processing
+soundfile
+
+# Image processing
+pillow
+
+# Numerical operations
+numpy
+
+# Optional: Flash attention for faster inference (requires CUDA)
+# flash-attn --no-build-isolation
+

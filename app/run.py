@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 Start the Qwen2.5-Omni Server
-Main entry point for running the Omni multimodal server
+Alternative entry point (can be run from app directory)
 """
 
 import uvicorn
