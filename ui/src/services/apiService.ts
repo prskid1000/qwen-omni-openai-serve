@@ -118,14 +118,9 @@ class ApiService {
   }
 
   decodeAudioBase64(base64Data: string): string {
-    // Convert base64 to blob URL
-    const binaryString = atob(base64Data);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-    const blob = new Blob([bytes], { type: 'audio/wav' });
-    return URL.createObjectURL(blob);
+    // Convert base64 to data URL (persists across reloads)
+    // HTML5 audio elements support data URLs
+    return `data:audio/wav;base64,${base64Data}`;
   }
 }
 

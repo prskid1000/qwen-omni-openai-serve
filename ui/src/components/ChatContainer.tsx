@@ -6,6 +6,16 @@ import { ChatSidebar } from './ChatSidebar';
 import { useChatHistoryContext } from '../contexts/ChatHistoryContext';
 import { apiService } from '../services/apiService';
 
+// Helper function to convert File to base64 data URL
+function convertFileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 export function ChatContainer() {
   const [isLoading, setIsLoading] = useState(false);
   const [serverStatus, setServerStatus] = useState<'online' | 'offline'>('online');
@@ -41,13 +51,24 @@ export function ChatContainer() {
     setIsLoading(true);
 
     try {
+      // Convert image/video files to base64 data URLs for persistence
+      let imageDataUrl: string | undefined;
+      let videoDataUrl: string | undefined;
+
+      if (imageFile) {
+        imageDataUrl = await convertFileToDataUrl(imageFile);
+      }
+      if (videoFile) {
+        videoDataUrl = await convertFileToDataUrl(videoFile);
+      }
+
       // Add user message to chat
       const userMessage = {
         role: 'user' as const,
         content: text || '[Media message]',
         timestamp: Date.now(),
-        imageUrl: imageFile ? URL.createObjectURL(imageFile) : undefined,
-        videoUrl: videoFile ? URL.createObjectURL(videoFile) : undefined,
+        imageUrl: imageDataUrl,
+        videoUrl: videoDataUrl,
       };
 
       addMessage(chatId, userMessage);
@@ -74,17 +95,18 @@ export function ChatContainer() {
         throw new Error('No response from server');
       }
 
-      // Decode audio if present
-      let audioUrl: string | undefined;
+      // Store base64 audio data (not blob URL) so it persists across reloads
+      let audioData: string | undefined;
       if (assistantMessage.audio?.data) {
-        audioUrl = apiService.decodeAudioBase64(assistantMessage.audio.data);
+        // Store the base64 data directly, not the blob URL
+        audioData = assistantMessage.audio.data;
       }
 
       // Add assistant message to chat
       const assistantMsg = {
         role: 'assistant' as const,
         content: assistantMessage.content,
-        audioData: audioUrl,
+        audioData: audioData, // Store base64, convert to blob URL when displaying
         timestamp: Date.now(),
       };
 

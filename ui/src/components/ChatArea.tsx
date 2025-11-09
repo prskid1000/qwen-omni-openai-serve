@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useMemo } from 'react';
 import { MessageBubble } from './MessageBubble';
 import { Loader2 } from 'lucide-react';
 import { Chat } from '../utils/storage';
+import { apiService } from '../services/apiService';
 
 interface ChatAreaProps {
   chat: Chat | null;
@@ -37,6 +38,53 @@ export function ChatArea({ chat, isLoading = false }: ChatAreaProps) {
     );
   }
 
+  // Convert base64 audio data to data URLs (persists across reloads)
+  // Images, videos, and audio are all stored as data URLs, so they work directly
+  const messagesWithMedia = useMemo(() => {
+    const processedMessages = chat.messages
+      .filter((message) => message.role !== 'system')
+      .map((message) => {
+        let audioUrl: string | undefined = message.audioData;
+        
+        // If audioData exists and is not already a data URL, convert from base64
+        if (message.audioData && !message.audioData.startsWith('data:')) {
+          try {
+            // Check if it looks like base64 (long base64 string, not a blob URL)
+            if (message.audioData.length > 100 && !message.audioData.startsWith('blob:')) {
+              audioUrl = apiService.decodeAudioBase64(message.audioData);
+            } else if (message.audioData.startsWith('blob:')) {
+              // Legacy blob URL - can't recover, set to undefined
+              audioUrl = undefined;
+            }
+          } catch (error) {
+            console.error('Error decoding audio:', error);
+            audioUrl = undefined;
+          }
+        }
+        
+        // Images and videos are stored as data URLs, so they work directly
+        // Handle legacy blob URLs by setting to undefined (can't recover)
+        let imageUrl = message.imageUrl;
+        let videoUrl = message.videoUrl;
+        
+        if (imageUrl && imageUrl.startsWith('blob:')) {
+          imageUrl = undefined; // Legacy blob URL, can't recover
+        }
+        if (videoUrl && videoUrl.startsWith('blob:')) {
+          videoUrl = undefined; // Legacy blob URL, can't recover
+        }
+        
+        return {
+          ...message,
+          audioUrl,
+          imageUrl,
+          videoUrl,
+        };
+      });
+    
+    return processedMessages;
+  }, [chat.messages]);
+
   return (
     <div ref={chatAreaRef} className="flex-1 overflow-y-auto scrollbar-thin p-4 md:p-8">
       <div className="max-w-4xl mx-auto">
@@ -51,19 +99,17 @@ export function ChatArea({ chat, isLoading = false }: ChatAreaProps) {
           </div>
         ) : (
           <>
-            {chat.messages
-              .filter((message) => message.role !== 'system') // Filter out system messages
-              .map((message, index) => (
-                <MessageBubble
-                  key={`${message.timestamp}-${index}`}
-                  role={message.role}
-                  content={message.content}
-                  audioUrl={message.audioData}
-                  imageUrl={message.imageUrl}
-                  videoUrl={message.videoUrl}
-                  timestamp={message.timestamp}
-                />
-              ))}
+            {messagesWithMedia.map((message, index) => (
+              <MessageBubble
+                key={`${message.timestamp}-${index}`}
+                role={message.role}
+                content={message.content}
+                audioUrl={message.audioUrl}
+                imageUrl={message.imageUrl}
+                videoUrl={message.videoUrl}
+                timestamp={message.timestamp}
+              />
+            ))}
             
             {isLoading && (
               <div className="flex justify-start mb-4">
