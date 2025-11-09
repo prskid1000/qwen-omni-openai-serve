@@ -1,20 +1,15 @@
-import { useState, useEffect } from 'react';
-import { Menu, X } from 'lucide-react';
-import { ChatSidebar } from './ChatSidebar';
+import { useState } from 'react';
 import { ChatArea } from './ChatArea';
 import { MessageInput } from './MessageInput';
 import { useChatHistory } from '../hooks/useChatHistory';
 import { apiService } from '../services/apiService';
 
 export function ChatContainer() {
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [serverStatus, setServerStatus] = useState<'online' | 'offline'>('online'); // Assume online, detect on error
-  const [audioOutputEnabled, setAudioOutputEnabled] = useState(true); // Default to enabled
+  const [serverStatus, setServerStatus] = useState<'online' | 'offline'>('online');
+  const [audioOutputEnabled, setAudioOutputEnabled] = useState(true);
   
   const {
-    chats,
-    currentChatId,
     currentChat,
     createNewChat,
     addMessage,
@@ -35,7 +30,7 @@ export function ChatContainer() {
     }
 
     // Create a new chat if none exists
-    let chatId = currentChatId;
+    let chatId = currentChat?.id;
     if (!chatId) {
       chatId = createNewChat();
     }
@@ -111,27 +106,8 @@ export function ChatContainer() {
 
   return (
     <div className="flex h-screen bg-dark-bg">
-      {/* Mobile menu button */}
-      <button
-        onClick={() => setSidebarOpen(!sidebarOpen)}
-        className="fixed top-4 left-4 z-50 p-2 bg-dark-surface hover:bg-dark-surfaceHover rounded-lg md:hidden"
-        aria-label="Toggle sidebar"
-      >
-        {sidebarOpen ? (
-          <X className="w-5 h-5" />
-        ) : (
-          <Menu className="w-5 h-5" />
-        )}
-      </button>
-
-      {/* Sidebar */}
-      <ChatSidebar
-        isOpen={sidebarOpen}
-        onToggle={() => setSidebarOpen(false)}
-      />
-
       {/* Main content */}
-      <div className="flex-1 flex flex-col md:ml-0">
+      <div className="flex-1 flex flex-col">
         {/* Server status bar */}
         {serverStatus === 'offline' && (
           <div className="bg-dark-error/20 border-b border-dark-error/50 px-4 py-2">
@@ -142,7 +118,7 @@ export function ChatContainer() {
         )}
 
         {/* Chat area */}
-        <ChatArea chat={currentChat} isLoading={isLoading} />
+        <ChatArea key={currentChat?.id || 'no-chat'} chat={currentChat} isLoading={isLoading} />
 
         {/* Input area */}
         <MessageInput 

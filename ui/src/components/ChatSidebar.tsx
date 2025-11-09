@@ -29,7 +29,10 @@ export function ChatSidebar({ isOpen, onToggle }: ChatSidebarProps) {
   } = useChatHistory();
 
   const handleNewChat = () => {
-    createNewChat(); // This already sets currentChatId internally
+    const newChatId = createNewChat();
+    if (newChatId) {
+      setCurrentChatId(newChatId);
+    }
     onToggle(); // Close sidebar on mobile after creating new chat
   };
 
