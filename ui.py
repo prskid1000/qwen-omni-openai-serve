@@ -1,6 +1,9 @@
 """
 Gradio Interface for Qwen2.5-Omni Server
 Multimodal chat interface supporting text, audio, image, and video inputs
+
+Note: The server uses the bnb 4-bit quantized model (wolfofbackstreet/Qwen2.5-Omni-3B-4Bit) by default.
+This provides efficient inference with reduced memory requirements.
 """
 
 import gradio as gr
@@ -291,6 +294,7 @@ def create_interface():
         gr.Markdown("""
         ### 📝 Notes
         
+        - **Model**: Uses bnb 4-bit quantized model (wolfofbackstreet/Qwen2.5-Omni-3B-4Bit) for efficient inference
         - **Text input is required** - All requests must include a text prompt
         - **Multimodal inputs are optional** - You can combine text with audio, image, and/or video
         - **Supported formats**:

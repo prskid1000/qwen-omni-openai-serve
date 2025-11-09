@@ -2,6 +2,10 @@
 """
 Start the Qwen2.5-Omni Server
 Main entry point for running the Omni multimodal server
+
+Note: The server uses the bnb 4-bit quantized model (wolfofbackstreet/Qwen2.5-Omni-3B-4Bit) by default.
+This provides efficient inference with reduced memory requirements.
+You can override this by setting the OMNI_MODEL_NAME environment variable.
 """
 
 import uvicorn

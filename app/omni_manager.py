@@ -39,19 +39,21 @@ class OmniModelManager:
         self.use_flash_attention = use_flash_attention
         self.talker_enabled = False
         self.context_length = None
-        self.current_audio_mode = None  # Track current mode: True for audio, False for text-only
+        self.use_talker = False  # Track talker state (like USE_TALKER in omni_bnb.py)
         
-    def load_model(self):
-        """Load Qwen2.5-Omni model with proper device handling (using bnb 4-bit quantized model)"""
+    def load_model(self, use_talker: bool = False):
+        """Load Qwen2.5-Omni model with proper device handling (using bnb 4-bit quantized model)
+        
+        Args:
+            use_talker: If True, keep talker enabled. If False, disable talker (like USE_TALKER in omni_bnb.py)
+        """
         print(f"Loading model: {self.model_name}")
         
-        # Prepare model loading kwargs - use device_map="auto" for automatic device placement
-        # This works well with quantized models and spreads across GPU/CPU if needed
+        # Prepare model loading kwargs - exactly like omni_bnb.py
         model_kwargs = {
-            "torch_dtype": torch.bfloat16,  # or torch.float16 if GPU prefers it
-            "device_map": "auto",  # Automatically spreads across your GPU/CPU if needed
             "trust_remote_code": True,  # Required for quantized models
-            "low_cpu_mem_usage": True
+            "device_map": "auto",  # spreads across your GPU/CPU if needed
+            "torch_dtype": torch.bfloat16  # or torch.float16 if your GPU prefers it
         }
         
         # Add flash attention if requested
@@ -59,11 +61,11 @@ class OmniModelManager:
             model_kwargs["attn_implementation"] = "flash_attention_2"
             print("Using flash_attention_2")
         
-        # Load the model (bnb 4-bit picked up from repo config)
+        # Load the model (bnb 4-bit picked up from repo config) - exactly like omni_bnb.py
         self.model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
             self.model_name,
             **model_kwargs
-        )
+        ).to("cuda")
         
         self.model.eval()  # Set to evaluation mode for faster inference
         
@@ -72,14 +74,17 @@ class OmniModelManager:
         print(f"Model loaded with device_map='auto' (primary device: {model_device})")
         print("ℹ️  Parameters may be distributed across devices")
         
-        # Handle talker: disable by default to avoid meta tensor errors
-        # (can be enabled later if return_audio=True is used)
-        if hasattr(self.model, 'disable_talker'):
+        # Handle talker exactly like omni_bnb.py
+        self.use_talker = use_talker
+        if not use_talker and hasattr(self.model, "disable_talker"):
             try:
                 self.model.disable_talker()
-                print("✓ Talker disabled (can enable if return_audio=True)")
+                print("✓ Talker disabled")
             except Exception as e:
                 print(f"Warning: Could not disable talker: {e}")
+        else:
+            self.talker_enabled = True
+            print("✓ Talker enabled")
         
         # Load processor
         self.processor = Qwen2_5OmniProcessor.from_pretrained(
@@ -107,28 +112,22 @@ class OmniModelManager:
         print("✅ Model loaded successfully")
     
     def reload_model_if_needed(self, return_audio: bool):
-        """Reload model if switching between audio and text-only modes"""
-        if self.current_audio_mode is None:
-            # First load, set mode
-            self.current_audio_mode = return_audio
-            return False  # No reload needed
+        """Reload model completely when toggling talker (exactly like omni_bnb.py pattern)"""
+        use_talker = return_audio
         
-        if self.current_audio_mode != return_audio:
-            # Mode changed, need to reload
-            print(f"🔄 Mode changed: {'text-only' if self.current_audio_mode else 'audio'} -> {'audio' if return_audio else 'text-only'}")
-            print("🔄 Reloading model to switch modes...")
-            
-            # Clear current model
+        # If model not loaded or talker state changed, reload completely
+        if self.model is None or self.use_talker != use_talker:
             if self.model is not None:
+                print(f"🔄 Reloading model (talker: {self.use_talker} -> {use_talker})...")
+                # Clear current model
                 del self.model
                 self.model = None
             if self.processor is not None:
                 del self.processor
                 self.processor = None
             
-            # Reload
-            self.load_model()
-            self.current_audio_mode = return_audio
+            # Reload with correct talker state
+            self.load_model(use_talker=use_talker)
             return True  # Reloaded
         
         return False  # No reload needed
@@ -245,14 +244,18 @@ class OmniModelManager:
                     # Integer tensors (like input_ids) should only move to device, keep integer dtype
                     inputs[k] = v.to(model_device)
                 else:
-                    # Float tensors can use model's dtype
+                    # Float tensors can use model's dtype (like omni_bnb.py)
                     inputs[k] = v.to(model_device, dtype=self.model.dtype)
         
-        # Generate response
+        # Generate response (exactly like omni_bnb.py)
         print(f"Generating response (return_audio={return_audio})...")
+        
+        # Get input length to extract only newly generated tokens
+        input_length = inputs['input_ids'].shape[1]
+        
         with torch.inference_mode():  # Faster inference, disables gradient computation
-            if return_audio:
-                # Generate with audio output (requires talker to be enabled)
+            if self.use_talker:
+                # Generate with audio output (USE_TALKER=True, exactly like omni_bnb.py)
                 text_ids, audio = self.model.generate(
                     **inputs,
                     max_new_tokens=max_new_tokens,
@@ -261,22 +264,17 @@ class OmniModelManager:
                     temperature=temperature if do_sample else None,
                     top_p=top_p if do_sample else None
                 )
-                # Decode text
+                # Extract only newly generated tokens (skip input prompt)
+                generated_ids = text_ids[:, input_length:]
+                # Decode only the newly generated text
                 response_text = self.processor.batch_decode(
-                    text_ids,
+                    generated_ids,
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=False
                 )[0]
-                return response_text, audio
+                return response_text.strip(), audio
             else:
-                # Disable talker if not already disabled (saves VRAM)
-                if hasattr(self.model, 'disable_talker'):
-                    try:
-                        self.model.disable_talker()
-                    except Exception:
-                        pass  # Already disabled or can't disable
-                
-                # Generate text only (talker disabled)
+                # Text-only generation (USE_TALKER=False, exactly like omni_bnb.py)
                 text_ids = self.model.generate(
                     **inputs,
                     max_new_tokens=max_new_tokens,
@@ -284,13 +282,15 @@ class OmniModelManager:
                     do_sample=do_sample,
                     temperature=temperature if do_sample else None,
                     top_p=top_p if do_sample else None,
-                    return_audio=False  # Disable audio generation
+                    return_audio=False  # Disable audio generation (exactly like omni_bnb.py)
                 )
-                # Decode and return
+                # Extract only newly generated tokens (skip input prompt)
+                generated_ids = text_ids[:, input_length:]
+                # Decode only the newly generated text
                 response = self.processor.batch_decode(
-                    text_ids,
+                    generated_ids,
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=False
                 )[0]
-                return response, None
+                return response.strip(), None
 

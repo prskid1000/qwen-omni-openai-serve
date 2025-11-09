@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI):
         print("🚀 Starting Omni Model Server...")
         
         # Initialize Omni model manager
-        model_name = os.getenv("OMNI_MODEL_NAME", "Qwen/Qwen2.5-Omni-3B")
+        model_name = os.getenv("OMNI_MODEL_NAME", "wolfofbackstreet/Qwen2.5-Omni-3B-4Bit")  # 4-bit quantized model (bnb)
         use_flash_attention = os.getenv("OMNI_USE_FLASH_ATTENTION", "true").lower() == "true"
         use_cpu_offload = os.getenv("OMNI_USE_CPU_OFFLOAD", "false").lower() == "true"
         
@@ -36,7 +36,8 @@ async def lifespan(app: FastAPI):
             use_flash_attention=use_flash_attention
         )
         
-        omni_manager.load_model()
+        # Load model with talker disabled by default (like USE_TALKER=False in omni_bnb.py)
+        omni_manager.load_model(use_talker=False)
         
         # Set manager in routes
         omni_chat.set_omni_manager(omni_manager)
