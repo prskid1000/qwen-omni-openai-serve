@@ -26,7 +26,7 @@ class OmniModelManager:
     
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen2.5-Omni-3B",
+        model_name: str = "wolfofbackstreet/Qwen2.5-Omni-3B-4Bit",  # 4-bit quantized model
         use_cpu_offload: bool = False,
         max_memory: Optional[dict] = None,
         use_flash_attention: bool = True
@@ -42,13 +42,15 @@ class OmniModelManager:
         self.current_audio_mode = None  # Track current mode: True for audio, False for text-only
         
     def load_model(self):
-        """Load Qwen2.5-Omni model with proper device handling"""
+        """Load Qwen2.5-Omni model with proper device handling (using bnb 4-bit quantized model)"""
         print(f"Loading model: {self.model_name}")
         
-        # Prepare model loading kwargs - use simpler approach: avoid sharding
+        # Prepare model loading kwargs - use device_map="auto" for automatic device placement
+        # This works well with quantized models and spreads across GPU/CPU if needed
         model_kwargs = {
-            "torch_dtype": torch.float16,
-            "device_map": None,  # Don't auto-shard, we'll move manually
+            "torch_dtype": torch.bfloat16,  # or torch.float16 if GPU prefers it
+            "device_map": "auto",  # Automatically spreads across your GPU/CPU if needed
+            "trust_remote_code": True,  # Required for quantized models
             "low_cpu_mem_usage": True
         }
         
@@ -57,17 +59,18 @@ class OmniModelManager:
             model_kwargs["attn_implementation"] = "flash_attention_2"
             print("Using flash_attention_2")
         
-        # Load the model
+        # Load the model (bnb 4-bit picked up from repo config)
         self.model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
             self.model_name,
             **model_kwargs
         )
         
-        # Move model to device (GPU if available, else CPU)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = self.model.to(device)
         self.model.eval()  # Set to evaluation mode for faster inference
-        print(f"Model moved to {device}")
+        
+        # Get device info (with device_map="auto", parameters may be on different devices)
+        model_device = next(self.model.parameters()).device
+        print(f"Model loaded with device_map='auto' (primary device: {model_device})")
+        print("ℹ️  Parameters may be distributed across devices")
         
         # Handle talker: disable by default to avoid meta tensor errors
         # (can be enabled later if return_audio=True is used)
@@ -79,7 +82,10 @@ class OmniModelManager:
                 print(f"Warning: Could not disable talker: {e}")
         
         # Load processor
-        self.processor = Qwen2_5OmniProcessor.from_pretrained(self.model_name)
+        self.processor = Qwen2_5OmniProcessor.from_pretrained(
+            self.model_name,
+            trust_remote_code=True
+        )
         
         # Get context length from model config
         if hasattr(self.model, 'config'):
@@ -231,14 +237,16 @@ class OmniModelManager:
         
         # Move all tensors to the same device/dtype as the model
         # Note: input_ids and other integer tensors must stay as Long/Int, not float16
+        # Get the device from the model (handles device_map="auto" case)
+        model_device = next(self.model.parameters()).device
         for k, v in list(inputs.items()):
             if isinstance(v, torch.Tensor):
                 if v.dtype in (torch.long, torch.int, torch.int32, torch.int64):
                     # Integer tensors (like input_ids) should only move to device, keep integer dtype
-                    inputs[k] = v.to(self.model.device)
+                    inputs[k] = v.to(model_device)
                 else:
                     # Float tensors can use model's dtype
-                    inputs[k] = v.to(self.model.device, dtype=self.model.dtype)
+                    inputs[k] = v.to(model_device, dtype=self.model.dtype)
         
         # Generate response
         print(f"Generating response (return_audio={return_audio})...")
