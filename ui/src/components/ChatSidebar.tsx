@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { Plus, Search, Trash2, MessageSquare, Edit2, Check, X, Trash } from 'lucide-react';
-import { useChatHistory } from '../hooks/useChatHistory';
+import { useChatHistoryContext } from '../contexts/ChatHistoryContext';
 import { Modal } from './Modal';
 
 interface ChatSidebarProps {
@@ -26,7 +26,7 @@ export function ChatSidebar({ isOpen, onToggle }: ChatSidebarProps) {
     deleteChat,
     renameChat,
     clearAllChats,
-  } = useChatHistory();
+  } = useChatHistoryContext();
 
   const handleNewChat = () => {
     const newChatId = createNewChat();
