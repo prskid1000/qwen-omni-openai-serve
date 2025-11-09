@@ -1,10 +1,12 @@
-import { useState } from 'react';
-import { Menu, X } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Menu, X, MessageSquare, Mic } from 'lucide-react';
 import { ChatArea } from './ChatArea';
 import { MessageInput } from './MessageInput';
+import { VoiceModeInput } from './VoiceModeInput';
 import { ChatSidebar } from './ChatSidebar';
 import { useChatHistoryContext } from '../contexts/ChatHistoryContext';
 import { apiService } from '../services/apiService';
+import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 
 // Helper function to convert File to base64 data URL
 function convertFileToDataUrl(file: File): Promise<string> {
@@ -16,17 +18,173 @@ function convertFileToDataUrl(file: File): Promise<string> {
   });
 }
 
+type InteractionMode = 'chat' | 'voice';
+
 export function ChatContainer() {
   const [isLoading, setIsLoading] = useState(false);
   const [serverStatus, setServerStatus] = useState<'online' | 'offline'>('online');
   const [audioOutputEnabled, setAudioOutputEnabled] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [mode, setMode] = useState<InteractionMode>('chat');
+  const lastAudioRef = useRef<HTMLAudioElement | null>(null);
   
   const {
     currentChat,
     createNewChat,
     addMessage,
   } = useChatHistoryContext();
+
+  // Voice recorder for voice mode
+  const {
+    isRecording,
+    audioBlob,
+    error: recordingError,
+    startRecording,
+    stopRecording,
+    clearRecording,
+    getAudioFile,
+  } = useVoiceRecorder();
+
+  const playAudioResponse = useCallback((audioUrl: string) => {
+    // Stop previous audio if playing
+    if (lastAudioRef.current) {
+      lastAudioRef.current.pause();
+      lastAudioRef.current = null;
+    }
+
+    const audio = new Audio(audioUrl);
+    audio.play().catch(err => {
+      console.error('Error playing audio:', err);
+    });
+    lastAudioRef.current = audio;
+  }, []);
+
+  const handleVoiceSend = useCallback(async (imageFile?: File, videoFile?: File) => {
+    // In voice mode, we need either audio or media
+    if (!audioBlob && !imageFile && !videoFile) return;
+
+    const audioFile = audioBlob ? getAudioFile() : undefined;
+
+    // Create a new chat if none exists
+    let chatId = currentChat?.id;
+    if (!chatId) {
+      chatId = createNewChat();
+    }
+
+    setIsLoading(true);
+
+    try {
+      // Convert image/video files to base64 data URLs for persistence
+      let imageDataUrl: string | undefined;
+      let videoDataUrl: string | undefined;
+
+      if (imageFile) {
+        imageDataUrl = await convertFileToDataUrl(imageFile);
+      }
+      if (videoFile) {
+        videoDataUrl = await convertFileToDataUrl(videoFile);
+      }
+
+      // Add user message
+      const userMessage = {
+        role: 'user' as const,
+        content: audioFile ? '[Voice message]' : '[Media message]',
+        timestamp: Date.now(),
+        imageUrl: imageDataUrl,
+        videoUrl: videoDataUrl,
+      };
+      addMessage(chatId, userMessage);
+
+      // Update server status
+      if (serverStatus === 'offline') {
+        setServerStatus('online');
+      }
+
+      // Send to API, force audio response in voice mode
+      const response = await apiService.sendMessage(
+        '', // No text in voice mode
+        audioFile,
+        imageFile,
+        videoFile,
+        {
+          returnAudio: true, // Always return audio in voice mode
+        }
+      );
+
+      // Extract response
+      const assistantMessage = response.choices[0]?.message;
+      if (!assistantMessage) {
+        throw new Error('No response from server');
+      }
+
+      // Store base64 audio data
+      let audioData: string | undefined;
+      if (assistantMessage.audio?.data) {
+        audioData = assistantMessage.audio.data;
+      }
+
+      // Add assistant message
+      const assistantMsg = {
+        role: 'assistant' as const,
+        content: assistantMessage.content,
+        audioData: audioData,
+        timestamp: Date.now(),
+      };
+
+      addMessage(chatId, assistantMsg);
+
+      // Clear recording
+      clearRecording();
+    } catch (error: any) {
+      if (error.message?.includes('connect') || error.message?.includes('No response')) {
+        setServerStatus('offline');
+      }
+
+      const errorMsg = {
+        role: 'assistant' as const,
+        content: `Error: ${error.message || 'Failed to get response from server'}`,
+        timestamp: Date.now(),
+      };
+      addMessage(chatId, errorMsg);
+      if (audioBlob) {
+        clearRecording();
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  }, [audioBlob, getAudioFile, currentChat?.id, addMessage, createNewChat, serverStatus]);
+
+  // Auto-send in voice mode when recording stops (only for voice, not media)
+  useEffect(() => {
+    if (mode === 'voice' && !isRecording && audioBlob && !isLoading) {
+      // Small delay to ensure blob is ready
+      const timer = setTimeout(() => {
+        handleVoiceSend();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [mode, isRecording, audioBlob, isLoading, handleVoiceSend]);
+
+  // Auto-play audio response in voice mode (only for new assistant messages)
+  const lastPlayedMessageId = useRef<string | null>(null);
+  useEffect(() => {
+    if (mode === 'voice' && currentChat?.messages.length > 0) {
+      const lastMessage = currentChat.messages[currentChat.messages.length - 1];
+      const messageId = `${lastMessage.timestamp}-${lastMessage.role}`;
+      
+      // Only play if it's a new assistant message with audio
+      if (
+        lastMessage.role === 'assistant' && 
+        lastMessage.audioData &&
+        lastPlayedMessageId.current !== messageId
+      ) {
+        lastPlayedMessageId.current = messageId;
+        // Convert base64 to data URL and play
+        const audioUrl = apiService.decodeAudioBase64(lastMessage.audioData);
+        playAudioResponse(audioUrl);
+      }
+    }
+  }, [mode, currentChat?.messages, playAudioResponse]);
 
   // No automatic chat creation - user must click "New Chat" button
   // Server status will be determined when user tries to send a message
@@ -136,20 +294,53 @@ export function ChatContainer() {
 
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Header with menu button */}
-        <div className="flex items-center gap-4 p-4 border-b border-dark-border md:hidden">
-          <button
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="p-2 hover:bg-dark-surfaceHover rounded-lg transition-colors"
-            aria-label="Toggle sidebar"
-          >
-            {sidebarOpen ? (
-              <X className="w-5 h-5 text-dark-text" />
-            ) : (
-              <Menu className="w-5 h-5 text-dark-text" />
-            )}
-          </button>
-          <h1 className="text-lg font-semibold text-dark-text">Omni Chat</h1>
+        {/* Header with menu button and mode toggle */}
+        <div className="flex items-center justify-between gap-4 p-4 border-b border-dark-border">
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => setSidebarOpen(!sidebarOpen)}
+              className="p-2 hover:bg-dark-surfaceHover rounded-lg transition-colors md:hidden"
+              aria-label="Toggle sidebar"
+            >
+              {sidebarOpen ? (
+                <X className="w-5 h-5 text-dark-text" />
+              ) : (
+                <Menu className="w-5 h-5 text-dark-text" />
+              )}
+            </button>
+            <h1 className="text-lg font-semibold text-dark-text">Omni Chat</h1>
+          </div>
+
+          {/* Mode Toggle */}
+          <div className="flex items-center gap-2 bg-dark-surface rounded-lg p-1">
+            <button
+              onClick={() => setMode('chat')}
+              className={`px-4 py-2 rounded-md transition-colors flex items-center gap-2 ${
+                mode === 'chat'
+                  ? 'bg-dark-accent text-white'
+                  : 'text-dark-textSecondary hover:text-dark-text'
+              }`}
+              aria-label="Chat mode"
+            >
+              <MessageSquare className="w-4 h-4" />
+              <span className="text-sm font-medium">Chat</span>
+            </button>
+            <button
+              onClick={() => {
+                setMode('voice');
+                clearRecording(); // Clear any existing recording when switching
+              }}
+              className={`px-4 py-2 rounded-md transition-colors flex items-center gap-2 ${
+                mode === 'voice'
+                  ? 'bg-dark-accent text-white'
+                  : 'text-dark-textSecondary hover:text-dark-text'
+              }`}
+              aria-label="Voice mode"
+            >
+              <Mic className="w-4 h-4" />
+              <span className="text-sm font-medium">Voice</span>
+            </button>
+          </div>
         </div>
 
         {/* Server status bar */}
@@ -165,13 +356,26 @@ export function ChatContainer() {
         <ChatArea key={currentChat?.id || 'no-chat'} chat={currentChat} isLoading={isLoading} />
 
         {/* Input area */}
-        <MessageInput 
-          onSend={handleSend} 
-          isLoading={isLoading} 
-          disabled={serverStatus === 'offline'}
-          audioOutputEnabled={audioOutputEnabled}
-          onAudioOutputToggle={() => setAudioOutputEnabled(!audioOutputEnabled)}
-        />
+        {mode === 'chat' ? (
+          <MessageInput 
+            onSend={handleSend} 
+            isLoading={isLoading} 
+            disabled={serverStatus === 'offline'}
+            audioOutputEnabled={audioOutputEnabled}
+            onAudioOutputToggle={() => setAudioOutputEnabled(!audioOutputEnabled)}
+          />
+        ) : (
+          <VoiceModeInput
+            isRecording={isRecording}
+            isLoading={isLoading}
+            disabled={serverStatus === 'offline'}
+            recordingError={recordingError}
+            onStartRecording={startRecording}
+            onStopRecording={stopRecording}
+            onClearRecording={clearRecording}
+            onSendWithMedia={handleVoiceSend}
+          />
+        )}
       </div>
     </div>
   );
