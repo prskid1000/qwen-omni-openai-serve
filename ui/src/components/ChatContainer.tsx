@@ -5,7 +5,7 @@ import { MessageInput } from './MessageInput';
 import { VoiceModeInput } from './VoiceModeInput';
 import { ChatSidebar } from './ChatSidebar';
 import { useChatHistoryContext } from '../contexts/ChatHistoryContext';
-import { apiService } from '../services/apiService';
+import { apiService, Tool, ChatMessage } from '../services/apiService';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 
 // Helper function to convert File to base64 data URL
@@ -24,6 +24,10 @@ export function ChatContainer() {
   const [isLoading, setIsLoading] = useState(false);
   const [serverStatus, setServerStatus] = useState<'online' | 'offline'>('online');
   const [audioOutputEnabled, setAudioOutputEnabled] = useState(true);
+  const [toolCallingEnabled, setToolCallingEnabled] = useState(true);
+  const [availableTools, setAvailableTools] = useState<Tool[]>([]);
+  const [toolsLoading, setToolsLoading] = useState(true);
+  const [toolsError, setToolsError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [mode, setMode] = useState<InteractionMode>('chat');
   const lastAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -44,6 +48,29 @@ export function ChatContainer() {
     clearRecording,
     getAudioFile,
   } = useVoiceRecorder();
+
+  // Load available tools on mount
+  useEffect(() => {
+    const loadTools = async () => {
+      setToolsLoading(true);
+      setToolsError(null);
+      try {
+        const response = await apiService.getAvailableTools();
+        console.log('Loaded tools:', response.tools);
+        setAvailableTools(response.tools || []);
+        if (!response.tools || response.tools.length === 0) {
+          setToolsError('No tools available');
+        }
+      } catch (error: any) {
+        console.error('Failed to load tools:', error);
+        setToolsError(error.message || 'Failed to load tools');
+        setAvailableTools([]);
+      } finally {
+        setToolsLoading(false);
+      }
+    };
+    loadTools();
+  }, []);
 
   const playAudioResponse = useCallback((audioUrl: string) => {
     // Stop previous audio if playing
@@ -236,6 +263,27 @@ export function ChatContainer() {
         setServerStatus('online');
       }
 
+      // Build messages array for tool calling
+      const messages: ChatMessage[] = currentChat?.messages.map(msg => ({
+        role: msg.role,
+        content: msg.content,
+        timestamp: msg.timestamp,
+        audioData: msg.audioData,
+        imageUrl: msg.imageUrl,
+        videoUrl: msg.videoUrl,
+        toolCalls: msg.toolCalls,
+        toolCallId: msg.toolCallId,
+      })) || [];
+
+      // Add the new user message
+      messages.push({
+        role: 'user',
+        content: text || '[Media message]',
+        timestamp: Date.now(),
+        imageUrl: imageDataUrl,
+        videoUrl: videoDataUrl,
+      });
+
       // Send to API
       const response = await apiService.sendMessage(
         text || 'Describe the uploaded media.',
@@ -243,7 +291,9 @@ export function ChatContainer() {
         imageFile,
         videoFile,
         {
-          returnAudio: audioOutputEnabled, // Use user's preference
+          returnAudio: audioOutputEnabled,
+          tools: toolCallingEnabled && availableTools.length > 0 ? availableTools : undefined,
+          messages: toolCallingEnabled ? messages : undefined,
         }
       );
 
@@ -253,22 +303,43 @@ export function ChatContainer() {
         throw new Error('No response from server');
       }
 
-      // Store base64 audio data (not blob URL) so it persists across reloads
-      let audioData: string | undefined;
-      if (assistantMessage.audio?.data) {
-        // Store the base64 data directly, not the blob URL
-        audioData = assistantMessage.audio.data;
+      // If conversation_messages are provided, add all of them (includes tool calls, tool results, and final response)
+      if (response.conversation_messages && response.conversation_messages.length > 0) {
+        // Skip the first message (user message) as we already added it
+        // Add all conversation messages (tool calls, tool results, final response)
+        for (const msg of response.conversation_messages) {
+          // Skip user messages as they're already in the chat
+          if (msg.role === 'user') {
+            continue;
+          }
+          
+          const conversationMsg: ChatMessage = {
+            role: msg.role as 'assistant' | 'tool',
+            content: msg.content,
+            timestamp: Date.now(),
+            toolCalls: msg.tool_calls,
+            toolCallId: msg.tool_call_id,
+          };
+          
+          // Add audio data if this is the final assistant message
+          if (msg.role === 'assistant' && assistantMessage.audio?.data) {
+            conversationMsg.audioData = assistantMessage.audio.data;
+          }
+          
+          addMessage(chatId, conversationMsg);
+        }
+      } else {
+        // Fallback: just add the assistant message (backward compatibility)
+        const audioData = assistantMessage.audio?.data;
+        const assistantMsg: ChatMessage = {
+          role: 'assistant' as const,
+          content: assistantMessage.content,
+          audioData: audioData,
+          timestamp: Date.now(),
+          toolCalls: assistantMessage.tool_calls,
+        };
+        addMessage(chatId, assistantMsg);
       }
-
-      // Add assistant message to chat
-      const assistantMsg = {
-        role: 'assistant' as const,
-        content: assistantMessage.content,
-        audioData: audioData, // Store base64, convert to blob URL when displaying
-        timestamp: Date.now(),
-      };
-
-      addMessage(chatId, assistantMsg);
     } catch (error: any) {
       // Check if it's a connection error and update server status
       if (error.message?.includes('connect') || error.message?.includes('No response')) {
@@ -288,9 +359,15 @@ export function ChatContainer() {
   };
 
   return (
-    <div className="flex h-screen bg-dark-bg">
+      <div className="flex h-screen bg-dark-bg">
       {/* Sidebar */}
-      <ChatSidebar isOpen={sidebarOpen} onToggle={() => setSidebarOpen(!sidebarOpen)} />
+      <ChatSidebar 
+        isOpen={sidebarOpen} 
+        onToggle={() => setSidebarOpen(!sidebarOpen)}
+        availableTools={availableTools}
+        toolsLoading={toolsLoading}
+        toolsError={toolsError}
+      />
 
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0">
@@ -357,12 +434,14 @@ export function ChatContainer() {
 
         {/* Input area */}
         {mode === 'chat' ? (
-          <MessageInput 
-            onSend={handleSend} 
-            isLoading={isLoading} 
+          <MessageInput
+            onSend={handleSend}
+            isLoading={isLoading}
             disabled={serverStatus === 'offline'}
             audioOutputEnabled={audioOutputEnabled}
             onAudioOutputToggle={() => setAudioOutputEnabled(!audioOutputEnabled)}
+            toolCallingEnabled={toolCallingEnabled}
+            onToolCallingToggle={() => setToolCallingEnabled(!toolCallingEnabled)}
           />
         ) : (
           <VoiceModeInput

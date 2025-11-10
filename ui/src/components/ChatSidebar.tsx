@@ -2,13 +2,24 @@ import { useState, useRef, useEffect } from 'react';
 import { Plus, Search, Trash2, MessageSquare, Edit2, Check, X, Trash } from 'lucide-react';
 import { useChatHistoryContext } from '../contexts/ChatHistoryContext';
 import { Modal } from './Modal';
+import { AvailableTools } from './AvailableTools';
+import { Tool } from '../services/apiService';
 
 interface ChatSidebarProps {
   isOpen: boolean;
   onToggle: () => void;
+  availableTools?: Tool[];
+  toolsLoading?: boolean;
+  toolsError?: string | null;
 }
 
-export function ChatSidebar({ isOpen, onToggle }: ChatSidebarProps) {
+export function ChatSidebar({ 
+  isOpen, 
+  onToggle, 
+  availableTools = [],
+  toolsLoading = false,
+  toolsError = null
+}: ChatSidebarProps) {
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [clearAllModalOpen, setClearAllModalOpen] = useState(false);
   const [chatToDelete, setChatToDelete] = useState<string | null>(null);
@@ -229,6 +240,13 @@ export function ChatSidebar({ isOpen, onToggle }: ChatSidebarProps) {
               </div>
             )}
           </div>
+
+          {/* Available Tools */}
+          <AvailableTools 
+            tools={availableTools} 
+            isLoading={toolsLoading}
+            error={toolsError}
+          />
 
           {/* Footer */}
           <div className="p-4 border-t border-dark-border">

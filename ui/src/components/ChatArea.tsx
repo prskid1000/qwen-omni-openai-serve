@@ -108,6 +108,8 @@ export function ChatArea({ chat, isLoading = false }: ChatAreaProps) {
                 imageUrl={message.imageUrl}
                 videoUrl={message.videoUrl}
                 timestamp={message.timestamp}
+                toolCalls={message.toolCalls}
+                toolCallId={message.toolCallId}
               />
             ))}
             

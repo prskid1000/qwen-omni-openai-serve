@@ -1,13 +1,24 @@
+export interface ToolCall {
+  id: string;
+  type: string;
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
 export interface Chat {
   id: string;
   title: string;
   messages: Array<{
-    role: 'user' | 'assistant' | 'system';
+    role: 'user' | 'assistant' | 'system' | 'tool';
     content: string;
     audioData?: string;
     imageUrl?: string;
     videoUrl?: string;
     timestamp: number;
+    toolCalls?: ToolCall[];
+    toolCallId?: string;
   }>;
   createdAt: number;
   updatedAt: number;

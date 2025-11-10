@@ -7,13 +7,16 @@ import time
 import uuid
 import base64
 import io
-from typing import TYPE_CHECKING, Optional
+import json
+import re
+from typing import TYPE_CHECKING, Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 import tempfile
 from pathlib import Path
 
-from ..models import OmniChatRequest, OmniChatResponse
+from ..models import OmniChatRequest, OmniChatResponse, OmniChatMessage
+from ..tool_service import tool_service
 
 if TYPE_CHECKING:
     from ..omni_manager import OmniModelManager
@@ -28,9 +31,133 @@ def set_omni_manager(manager):
     omni_manager = manager
 
 
+@router.get("/v1/omni/tools")
+async def get_available_tools():
+    """Get list of available tools"""
+    return {
+        "tools": tool_service.get_available_tools()
+    }
+
+
+def parse_tool_calls_from_text(text: str) -> List[Dict[str, Any]]:
+    """Parse tool calls from model text response (JSON format)"""
+    tool_calls = []
+    
+    if not text:
+        return tool_calls
+    
+    print(f"🔍 Parsing tool calls from text (length: {len(text)})")
+    print(f"📝 Text preview: {text[:200]}...")
+    
+    # Look for JSON tool call patterns like: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+    # More flexible pattern that handles whitespace
+    pattern = r'<tool_call>\s*(.*?)\s*</tool_call>'
+    matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
+    
+    print(f"🔍 Found {len(matches)} potential tool call matches with <tool_call> tags")
+    
+    for match in matches:
+        try:
+            cleaned_match = match.strip()
+            print(f"🔍 Attempting to parse: {cleaned_match[:100]}...")
+            tool_data = json.loads(cleaned_match)
+            if "name" in tool_data and "arguments" in tool_data:
+                tool_call_id = f"call_{uuid.uuid4().hex[:8]}"
+                tool_calls.append({
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_data["name"],
+                        "arguments": json.dumps(tool_data["arguments"]) if isinstance(tool_data["arguments"], dict) else str(tool_data["arguments"])
+                    }
+                })
+                print(f"✅ Successfully parsed tool call: {tool_data['name']}")
+        except json.JSONDecodeError as e:
+            print(f"⚠️  JSON decode error: {e}")
+            continue
+        except Exception as e:
+            print(f"⚠️  Error parsing tool call: {e}")
+            continue
+    
+    # Also try to parse standalone JSON objects that look like tool calls
+    if not tool_calls:
+        # More flexible pattern for JSON objects with name and arguments
+        json_pattern = r'\{[^{}]*"name"\s*:\s*"[^"]+"[^{}]*"arguments"\s*:\s*\{[^{}]*\}[^{}]*\}'
+        json_matches = re.findall(json_pattern, text, re.DOTALL)
+        print(f"🔍 Found {len(json_matches)} potential standalone JSON matches")
+        
+        for match in json_matches:
+            try:
+                tool_data = json.loads(match)
+                if "name" in tool_data and "arguments" in tool_data:
+                    tool_call_id = f"call_{uuid.uuid4().hex[:8]}"
+                    tool_calls.append({
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_data["name"],
+                            "arguments": json.dumps(tool_data["arguments"]) if isinstance(tool_data["arguments"], dict) else str(tool_data["arguments"])
+                        }
+                    })
+                    print(f"✅ Successfully parsed standalone tool call: {tool_data['name']}")
+            except json.JSONDecodeError as e:
+                print(f"⚠️  JSON decode error for standalone: {e}")
+                continue
+            except Exception as e:
+                print(f"⚠️  Error parsing standalone tool call: {e}")
+                continue
+    
+    print(f"🔍 Final result: {len(tool_calls)} tool call(s) parsed")
+    return tool_calls
+
+
+def execute_tool_calls(tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Execute tool calls and return results"""
+    tool_results = []
+    
+    for tool_call in tool_calls:
+        tool_call_id = tool_call.get("id", f"call_{uuid.uuid4().hex[:8]}")
+        function = tool_call.get("function", {})
+        tool_name = function.get("name", "")
+        arguments_str = function.get("arguments", "{}")
+        
+        try:
+            # Parse arguments
+            if isinstance(arguments_str, str):
+                arguments = json.loads(arguments_str)
+            else:
+                arguments = arguments_str
+            
+            # Execute tool
+            result = tool_service.execute_tool(tool_name, arguments)
+            
+            # Format result
+            if isinstance(result, (dict, list)):
+                result_str = json.dumps(result, ensure_ascii=False)
+            else:
+                result_str = str(result)
+            
+            tool_results.append({
+                "tool_call_id": tool_call_id,
+                "role": "tool",
+                "name": tool_name,
+                "content": result_str
+            })
+            
+        except Exception as e:
+            tool_results.append({
+                "tool_call_id": tool_call_id,
+                "role": "tool",
+                "name": tool_name,
+                "content": f"Error: {str(e)}"
+            })
+    
+    return tool_results
+
+
 @router.post("/v1/omni/chat/completions")
 async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
-    """Create chat completion with Qwen2.5-Omni (multimodal support)"""
+    """Create chat completion with Qwen2.5-Omni (multimodal support + tool calling)"""
     
     if not omni_manager:
         raise HTTPException(status_code=500, detail="Omni model not loaded")
@@ -38,95 +165,276 @@ async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
     if not request.messages:
         raise HTTPException(status_code=400, detail="At least one message is required")
     
-    # Get the last user message (for now, we'll process the last message)
-    last_message = request.messages[-1]
-    
-    if last_message.role != "user":
-        raise HTTPException(status_code=400, detail="Last message must be from user")
-    
     # Determine if audio is requested (OpenAI-compatible: response_format)
     wants_audio = False
     if request.response_format and request.response_format.type == "audio":
         wants_audio = True
     
-    print(f"📨 Omni Chat: text_len={len(last_message.content)}, "
-          f"audio={bool(last_message.audio_path)}, "
-          f"image={bool(last_message.image_path)}, "
-          f"video={bool(last_message.video_path)}, "
-          f"response_format={request.response_format.type if request.response_format else 'text'}, "
-          f"wants_audio={wants_audio}")
+    # Check if tools are provided
+    has_tools = request.tools is not None and len(request.tools) > 0
+    
+    # Build conversation history for tool calling
+    conversation_messages = request.messages.copy()
+    max_iterations = 5  # Limit tool calling iterations
+    iteration = 0
     
     try:
         # Reload model if switching between audio/text modes
         omni_manager.reload_model_if_needed(wants_audio)
         
-        # Generate response
-        response_text, audio_tensor = omni_manager.generate_response(
-            text_prompt=last_message.content,
-            audio_path=last_message.audio_path,
-            image_path=last_message.image_path,
-            video_path=last_message.video_path,
-            max_new_tokens=request.max_tokens,
-            return_audio=wants_audio,
-            temperature=request.temperature,
-            top_p=request.top_p
-        )
+        # If tools are provided, add tool descriptions to system prompt
+        tool_prompt = ""
+        if has_tools:
+            tool_schemas = [tool.dict() for tool in request.tools]
+            tool_prompt = "\n\nAvailable tools:\n"
+            for tool in request.tools:
+                tool_prompt += f"- {tool.function.name}: {tool.function.description}\n"
+            tool_prompt += "\nTo use a tool, format your response as:\n<tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>\n"
         
-        # Encode audio if present
-        audio_base64 = None
+        # Process messages and handle tool calls iteratively
+        final_response = None
+        final_audio = None
         
-        if audio_tensor is not None:
-            try:
-                import soundfile as sf
-                import numpy as np
+        while iteration < max_iterations:
+            iteration += 1
+            
+            # Get the last message for processing
+            last_message = conversation_messages[-1]
+            
+            # Build full conversation context for the model
+            # Include all previous messages in the conversation
+            conversation_context = ""
+            for msg in conversation_messages:
+                if msg.role == "user":
+                    conversation_context += f"User: {msg.content or ''}\n\n"
+                elif msg.role == "assistant":
+                    conversation_context += f"Assistant: {msg.content or ''}\n\n"
+                elif msg.role == "tool":
+                    conversation_context += f"Tool Result ({msg.tool_call_id}): {msg.content or ''}\n\n"
+            
+            # Add the current message
+            text_prompt = last_message.content or ""
+            
+            # Add tool information on first iteration
+            if has_tools and iteration == 1 and tool_prompt:
+                text_prompt = text_prompt + tool_prompt
+            
+            # Build full prompt with conversation history
+            if conversation_context and iteration > 1:
+                full_prompt = conversation_context + f"User: {text_prompt}\n\nAssistant:"
+            else:
+                full_prompt = text_prompt
+            
+            # Generate response
+            response_text, audio_tensor = omni_manager.generate_response(
+                text_prompt=full_prompt,
+                audio_path=last_message.audio_path,
+                image_path=last_message.image_path,
+                video_path=last_message.video_path,
+                max_new_tokens=request.max_tokens,
+                return_audio=wants_audio,
+                temperature=request.temperature,
+                top_p=request.top_p
+            )
+            
+            # Store final response (will be overwritten if we continue)
+            final_response = response_text
+            final_audio = audio_tensor
+            
+            # Check for tool calls in response
+            tool_calls = parse_tool_calls_from_text(response_text)
+            
+            print(f"🔍 Iteration {iteration}: Found {len(tool_calls) if tool_calls else 0} tool call(s)")
+            
+                # If no tool calls, return the final response
+            if not tool_calls or not has_tools:
+                # Clean up tool call markers from response
+                cleaned_text = re.sub(r'<tool_call>.*?</tool_call>', '', final_response, flags=re.DOTALL).strip()
+                if not cleaned_text:
+                    cleaned_text = final_response
                 
-                # Convert tensor to numpy
-                audio_np = audio_tensor.reshape(-1).detach().cpu().numpy()
+                # Encode audio if present
+                audio_base64 = None
+                if final_audio is not None:
+                    try:
+                        import soundfile as sf
+                        import numpy as np
+                        
+                        audio_np = final_audio.reshape(-1).detach().cpu().numpy()
+                        audio_buffer = io.BytesIO()
+                        sf.write(audio_buffer, audio_np.reshape(-1, 1), 24000, format='WAV', subtype='PCM_16')
+                        audio_buffer.seek(0)
+                        audio_bytes = audio_buffer.read()
+                        audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+                        
+                        print(f"✅ Audio generated: {len(audio_base64)} bytes (base64)")
+                    except Exception as e:
+                        print(f"⚠️  Failed to encode audio: {e}")
                 
-                # Write to bytes buffer
-                audio_buffer = io.BytesIO()
-                sf.write(audio_buffer, audio_np.reshape(-1, 1), 24000, format='WAV', subtype='PCM_16')
-                audio_buffer.seek(0)
-                audio_bytes = audio_buffer.read()
-                audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+                # Build conversation messages for UI (include all steps)
+                conversation_for_ui = []
+                for msg in conversation_messages:
+                    msg_dict = {
+                        "role": msg.role,
+                        "content": msg.content,
+                    }
+                    if msg.tool_calls:
+                        msg_dict["tool_calls"] = msg.tool_calls
+                    if msg.tool_call_id:
+                        msg_dict["tool_call_id"] = msg.tool_call_id
+                    conversation_for_ui.append(msg_dict)
                 
-                print(f"✅ Audio generated: {len(audio_base64)} bytes (base64)")
-            except Exception as e:
-                print(f"⚠️  Failed to encode audio: {e}")
+                # Add the final assistant response
+                final_msg_dict = {
+                    "role": "assistant",
+                    "content": cleaned_text
+                }
+                if tool_calls:
+                    final_msg_dict["tool_calls"] = tool_calls
+                conversation_for_ui.append(final_msg_dict)
+                
+                # Estimate tokens
+                prompt_tokens = sum(len(msg.content.split()) if msg.content else 0 for msg in conversation_messages)
+                completion_tokens = len(cleaned_text.split())
+                
+                # Build message according to OpenAI format
+                message = {
+                    "role": "assistant",
+                    "content": cleaned_text
+                }
+                
+                # Add tool calls if present (from first iteration)
+                if tool_calls:
+                    message["tool_calls"] = tool_calls
+                
+                # If audio is present, add it in OpenAI format
+                if audio_base64:
+                    message["audio"] = {
+                        "data": audio_base64,
+                        "format": "wav"
+                    }
+                
+                finish_reason = "tool_calls" if tool_calls else "stop"
+                
+                return OmniChatResponse(
+                    id=f"omni-{uuid.uuid4().hex[:8]}",
+                    model=omni_manager.model_name,
+                    choices=[{
+                        "index": 0,
+                        "message": message,
+                        "finish_reason": finish_reason
+                    }],
+                    usage={
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens
+                    },
+                    conversation_messages=conversation_for_ui,
+                    audio_base64=audio_base64  # Keep for backward compatibility
+                )
+            
+            # Execute tool calls
+            print(f"🔧 Executing {len(tool_calls)} tool call(s)...")
+            tool_results = execute_tool_calls(tool_calls)
+            
+            # Add assistant message with tool calls to conversation
+            assistant_msg = OmniChatMessage(
+                role="assistant",
+                content=response_text,
+                tool_calls=tool_calls
+            )
+            conversation_messages.append(assistant_msg)
+            
+            # Add tool results to conversation
+            tool_results_text = "Tool results:\n"
+            for tool_result in tool_results:
+                tool_msg = OmniChatMessage(
+                    role="tool",
+                    content=tool_result["content"],
+                    tool_call_id=tool_result["tool_call_id"]
+                )
+                conversation_messages.append(tool_msg)
+                tool_results_text += f"- {tool_result['name']}: {tool_result['content']}\n"
+            
+            # Create a new user message with tool results to continue the conversation
+            continue_msg = OmniChatMessage(
+                role="user",
+                content=f"Based on the tool results, please provide a final answer:\n{tool_results_text}"
+            )
+            conversation_messages.append(continue_msg)
+            
+            # Continue generation with tool results (next iteration)
+            # The loop will continue and generate a new response with the tool results
+            continue
         
-        # Estimate tokens (simple word count)
-        prompt_tokens = len(last_message.content.split())
-        completion_tokens = len(response_text.split())
+        # If we've exhausted iterations, return the last response we got
+        if final_response:
+            cleaned_text = re.sub(r'<tool_call>.*?</tool_call>', '', final_response, flags=re.DOTALL).strip()
+            if not cleaned_text:
+                cleaned_text = final_response
+            
+            # Build conversation messages for UI
+            conversation_for_ui = []
+            for msg in conversation_messages:
+                msg_dict = {
+                    "role": msg.role,
+                    "content": msg.content,
+                }
+                if msg.tool_calls:
+                    msg_dict["tool_calls"] = msg.tool_calls
+                if msg.tool_call_id:
+                    msg_dict["tool_call_id"] = msg.tool_call_id
+                conversation_for_ui.append(msg_dict)
+            
+            # Add final response
+            conversation_for_ui.append({
+                "role": "assistant",
+                "content": cleaned_text
+            })
+            
+            # Encode audio if present
+            audio_base64 = None
+            if final_audio is not None:
+                try:
+                    import soundfile as sf
+                    import numpy as np
+                    
+                    audio_np = final_audio.reshape(-1).detach().cpu().numpy()
+                    audio_buffer = io.BytesIO()
+                    sf.write(audio_buffer, audio_np.reshape(-1, 1), 24000, format='WAV', subtype='PCM_16')
+                    audio_buffer.seek(0)
+                    audio_bytes = audio_buffer.read()
+                    audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+                except Exception as e:
+                    print(f"⚠️  Failed to encode audio: {e}")
+            
+            prompt_tokens = sum(len(msg.content.split()) if msg.content else 0 for msg in conversation_messages)
+            completion_tokens = len(cleaned_text.split())
+            
+            return OmniChatResponse(
+                id=f"omni-{uuid.uuid4().hex[:8]}",
+                model=omni_manager.model_name,
+                choices=[{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": cleaned_text
+                    },
+                    "finish_reason": "stop"
+                }],
+                usage={
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens
+                },
+                conversation_messages=conversation_for_ui,
+                audio_base64=audio_base64
+            )
         
-        # Build message according to OpenAI format
-        message = {
-            "role": "assistant",
-            "content": response_text
-        }
+        raise HTTPException(status_code=500, detail="Maximum tool calling iterations reached")
         
-        # If audio is present, add it in OpenAI format: message.audio.data
-        if audio_base64:
-            message["audio"] = {
-                "data": audio_base64,
-                "format": "wav"
-            }
-        
-        return OmniChatResponse(
-            id=f"omni-{uuid.uuid4().hex[:8]}",
-            model=omni_manager.model_name,
-            choices=[{
-                "index": 0,
-                "message": message,
-                "finish_reason": "stop"
-            }],
-            usage={
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens
-            },
-            audio_base64=audio_base64  # Keep for backward compatibility
-        )
-        
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
 

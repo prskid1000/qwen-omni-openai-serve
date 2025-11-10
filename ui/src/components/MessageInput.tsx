@@ -1,5 +1,5 @@
 import { useState, useRef, ChangeEvent, FormEvent } from 'react';
-import { Send, Paperclip, Mic, X, Loader2, Volume2, VolumeX } from 'lucide-react';
+import { Send, Paperclip, Mic, X, Loader2, Volume2, VolumeX, Wrench } from 'lucide-react';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { FilePreview } from './FilePreview';
 
@@ -14,9 +14,19 @@ interface MessageInputProps {
   disabled?: boolean;
   audioOutputEnabled?: boolean;
   onAudioOutputToggle?: () => void;
+  toolCallingEnabled?: boolean;
+  onToolCallingToggle?: () => void;
 }
 
-export function MessageInput({ onSend, isLoading = false, disabled = false, audioOutputEnabled = true, onAudioOutputToggle }: MessageInputProps) {
+export function MessageInput({ 
+  onSend, 
+  isLoading = false, 
+  disabled = false, 
+  audioOutputEnabled = true, 
+  onAudioOutputToggle,
+  toolCallingEnabled = true,
+  onToolCallingToggle
+}: MessageInputProps) {
   const [text, setText] = useState('');
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [videoFile, setVideoFile] = useState<File | null>(null);
@@ -218,6 +228,24 @@ export function MessageInput({ onSend, isLoading = false, disabled = false, audi
                 ) : (
                   <VolumeX className="w-5 h-5" />
                 )}
+              </button>
+            )}
+
+            {/* Tool calling toggle */}
+            {onToolCallingToggle && (
+              <button
+                type="button"
+                onClick={onToolCallingToggle}
+                disabled={disabled || isLoading}
+                className={`p-3 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  toolCallingEnabled
+                    ? 'bg-dark-accent/20 hover:bg-dark-accent/30 text-dark-accent'
+                    : 'bg-dark-surface hover:bg-dark-surfaceHover text-dark-textSecondary'
+                }`}
+                aria-label={toolCallingEnabled ? 'Disable tool calling' : 'Enable tool calling'}
+                title={toolCallingEnabled ? 'Tool calling enabled' : 'Tool calling disabled'}
+              >
+                <Wrench className="w-5 h-5" />
               </button>
             )}
 
