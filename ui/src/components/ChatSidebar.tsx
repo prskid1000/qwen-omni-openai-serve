@@ -3,6 +3,7 @@ import { Plus, Search, Trash2, MessageSquare, Edit2, Check, X, Trash } from 'luc
 import { useChatHistoryContext } from '../contexts/ChatHistoryContext';
 import { Modal } from './Modal';
 import { AvailableTools } from './AvailableTools';
+import { MCPServerManager } from './MCPServerManager';
 import { Tool } from '../services/apiService';
 
 interface ChatSidebarProps {
@@ -246,7 +247,16 @@ export function ChatSidebar({
             tools={availableTools} 
             isLoading={toolsLoading}
             error={toolsError}
+            onRefresh={() => {
+              // Trigger tools refresh via event
+              if (window.dispatchEvent) {
+                window.dispatchEvent(new CustomEvent('refreshTools'));
+              }
+            }}
           />
+
+          {/* MCP Server Manager */}
+          <MCPServerManager />
 
           {/* Footer */}
           <div className="p-4 border-t border-dark-border">

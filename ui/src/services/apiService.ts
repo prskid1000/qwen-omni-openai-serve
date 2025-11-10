@@ -236,6 +236,53 @@ class ApiService {
     // HTML5 audio elements support data URLs
     return `data:audio/wav;base64,${base64Data}`;
   }
+
+  // MCP Server Management APIs
+  async getMCPServers(): Promise<{ servers: Array<{ id: string; status: string; config: any; error?: string }> }> {
+    try {
+      const response = await axios.get(`${this.baseURL}/v1/mcp/servers`);
+      return response.data;
+    } catch (error: any) {
+      throw new Error(error.response?.data?.detail || 'Failed to fetch MCP servers');
+    }
+  }
+
+  async connectMCPServer(serverId: string, serverConfig: any): Promise<{ success: boolean; status: string; error?: string }> {
+    try {
+      const response = await axios.post(`${this.baseURL}/v1/mcp/servers/connect`, {
+        server_id: serverId,
+        server_config: serverConfig,
+      });
+      return response.data;
+    } catch (error: any) {
+      throw new Error(error.response?.data?.detail || 'Failed to connect MCP server');
+    }
+  }
+
+  async disconnectMCPServer(serverId: string): Promise<void> {
+    try {
+      await axios.post(`${this.baseURL}/v1/mcp/servers/${serverId}/disconnect`);
+    } catch (error: any) {
+      throw new Error(error.response?.data?.detail || 'Failed to disconnect MCP server');
+    }
+  }
+
+  async removeMCPServer(serverId: string): Promise<void> {
+    try {
+      await axios.delete(`${this.baseURL}/v1/mcp/servers/${serverId}`);
+    } catch (error: any) {
+      throw new Error(error.response?.data?.detail || 'Failed to remove MCP server');
+    }
+  }
+
+  async getMCPServerStatus(serverId: string): Promise<{ server_id: string; status: string; config: any }> {
+    try {
+      const response = await axios.get(`${this.baseURL}/v1/mcp/servers/${serverId}/status`);
+      return response.data;
+    } catch (error: any) {
+      throw new Error(error.response?.data?.detail || 'Failed to get MCP server status');
+    }
+  }
 }
 
 export const apiService = new ApiService();

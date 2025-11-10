@@ -46,6 +46,7 @@ class OmniChatRequest(BaseModel):
     response_format: Optional[ResponseFormat] = Field(default=None, description="OpenAI-compatible response format: {'type': 'text'} or {'type': 'audio'}")
     tools: Optional[List[Tool]] = Field(default=None, description="List of available tools for function calling")
     tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(default=None, description="Tool choice: 'none', 'auto', or specific tool")
+    language: Optional[str] = Field(default="en", description="Response language code (e.g., 'en' for English, 'zh' for Chinese). Default: 'en'")
 
 
 class OmniChatResponse(BaseModel):
@@ -77,3 +78,45 @@ class ToolExecutionResult(BaseModel):
     result: Any
     error: Optional[str] = None
 
+
+# MCP Server Management Models
+class MCPServerConfig(BaseModel):
+    """MCP Server configuration"""
+    # STDIO config
+    command: Optional[str] = None
+    args: Optional[List[str]] = None
+    env: Optional[Dict[str, str]] = None
+    
+    # HTTP config
+    url: Optional[str] = None
+    prefer_sse: Optional[bool] = False
+    
+    # Common config
+    timeout: Optional[int] = None
+    version: Optional[str] = None
+
+
+class MCPServerConnectRequest(BaseModel):
+    """Request to connect to an MCP server"""
+    server_id: str
+    server_config: MCPServerConfig
+
+
+class MCPServerSummary(BaseModel):
+    """Summary of an MCP server"""
+    id: str
+    status: str  # "disconnected", "connecting", "connected"
+    config: Dict[str, Any]
+    error: Optional[str] = None
+
+
+class MCPServerListResponse(BaseModel):
+    """Response listing all MCP servers"""
+    servers: List[MCPServerSummary]
+
+
+class MCPServerConnectResponse(BaseModel):
+    """Response from connecting to an MCP server"""
+    success: bool
+    status: str
+    error: Optional[str] = None

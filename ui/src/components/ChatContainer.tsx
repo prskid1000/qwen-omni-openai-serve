@@ -49,28 +49,51 @@ export function ChatContainer() {
     getAudioFile,
   } = useVoiceRecorder();
 
-  // Load available tools on mount
-  useEffect(() => {
-    const loadTools = async () => {
-      setToolsLoading(true);
-      setToolsError(null);
-      try {
-        const response = await apiService.getAvailableTools();
-        console.log('Loaded tools:', response.tools);
-        setAvailableTools(response.tools || []);
-        if (!response.tools || response.tools.length === 0) {
-          setToolsError('No tools available');
-        }
-      } catch (error: any) {
-        console.error('Failed to load tools:', error);
-        setToolsError(error.message || 'Failed to load tools');
-        setAvailableTools([]);
-      } finally {
-        setToolsLoading(false);
+  // Load available tools on mount and when MCP servers change
+  const loadTools = useCallback(async () => {
+    setToolsLoading(true);
+    setToolsError(null);
+    try {
+      const response = await apiService.getAvailableTools();
+      console.log('Loaded tools:', response.tools);
+      console.log('Tool count:', response.tools?.length || 0);
+      setAvailableTools(response.tools || []);
+      if (!response.tools || response.tools.length === 0) {
+        setToolsError('No tools available');
       }
-    };
-    loadTools();
+    } catch (error: any) {
+      console.error('Failed to load tools:', error);
+      setToolsError(error.message || 'Failed to load tools');
+      setAvailableTools([]);
+    } finally {
+      setToolsLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    loadTools();
+  }, [loadTools]);
+
+  // Refresh tools when MCP servers connect/disconnect or manual refresh
+  useEffect(() => {
+    const handleMCPChange = () => {
+      loadTools();
+    };
+    
+    const handleRefresh = () => {
+      loadTools();
+    };
+
+    window.addEventListener('mcpServerConnected', handleMCPChange);
+    window.addEventListener('mcpServerDisconnected', handleMCPChange);
+    window.addEventListener('refreshTools', handleRefresh);
+
+    return () => {
+      window.removeEventListener('mcpServerConnected', handleMCPChange);
+      window.removeEventListener('mcpServerDisconnected', handleMCPChange);
+      window.removeEventListener('refreshTools', handleRefresh);
+    };
+  }, [loadTools]);
 
   const playAudioResponse = useCallback((audioUrl: string) => {
     // Stop previous audio if playing

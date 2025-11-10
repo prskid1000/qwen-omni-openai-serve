@@ -33,9 +33,10 @@ def set_omni_manager(manager):
 
 @router.get("/v1/omni/tools")
 async def get_available_tools():
-    """Get list of available tools"""
+    """Get list of available tools (includes built-in and MCP tools)"""
+    tools = await tool_service.get_available_tools()
     return {
-        "tools": tool_service.get_available_tools()
+        "tools": tools
     }
 
 
@@ -111,7 +112,7 @@ def parse_tool_calls_from_text(text: str) -> List[Dict[str, Any]]:
     return tool_calls
 
 
-def execute_tool_calls(tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+async def execute_tool_calls(tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Execute tool calls and return results"""
     tool_results = []
     
@@ -128,8 +129,8 @@ def execute_tool_calls(tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             else:
                 arguments = arguments_str
             
-            # Execute tool
-            result = tool_service.execute_tool(tool_name, arguments)
+            # Execute tool (now async)
+            result = await tool_service.execute_tool(tool_name, arguments)
             
             # Format result
             if isinstance(result, (dict, list)):
@@ -182,14 +183,39 @@ async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
         # Reload model if switching between audio/text modes
         omni_manager.reload_model_if_needed(wants_audio)
         
+        # Get language preference (default to English)
+        language = getattr(request, 'language', 'en') or 'en'
+        language_instruction = ""
+        if language == 'en':
+            language_instruction = "Please respond in English only."
+        elif language == 'zh':
+            language_instruction = "请用中文回答。"
+        else:
+            language_instruction = f"Please respond in {language}."
+        
         # If tools are provided, add tool descriptions to system prompt
+        # Note: LLM only sees tool names and descriptions, not MCP server details
         tool_prompt = ""
         if has_tools:
-            tool_schemas = [tool.dict() for tool in request.tools]
-            tool_prompt = "\n\nAvailable tools:\n"
+            # Clean tool schemas - remove any internal metadata
+            clean_tool_schemas = []
+            for tool in request.tools:
+                tool_dict = tool.dict()
+                # Remove any internal metadata (keys starting with _)
+                clean_tool = {k: v for k, v in tool_dict.items() if not k.startswith("_")}
+                if "function" in clean_tool:
+                    clean_function = {k: v for k, v in clean_tool["function"].items() if not k.startswith("_")}
+                    clean_tool["function"] = clean_function
+                clean_tool_schemas.append(clean_tool)
+            
+            tool_prompt = f"\n\n{language_instruction}\n\nAvailable tools:\n"
             for tool in request.tools:
                 tool_prompt += f"- {tool.function.name}: {tool.function.description}\n"
             tool_prompt += "\nTo use a tool, format your response as:\n<tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>\n"
+        else:
+            # Add language instruction even without tools
+            if language_instruction:
+                tool_prompt = f"\n\n{language_instruction}\n"
         
         # Process messages and handle tool calls iteratively
         final_response = None
@@ -215,9 +241,13 @@ async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
             # Add the current message
             text_prompt = last_message.content or ""
             
-            # Add tool information on first iteration
-            if has_tools and iteration == 1 and tool_prompt:
-                text_prompt = text_prompt + tool_prompt
+            # Add language instruction and tool information on first iteration
+            if iteration == 1:
+                if tool_prompt:
+                    text_prompt = text_prompt + tool_prompt
+                elif language_instruction:
+                    # Add language instruction even if no tools
+                    text_prompt = text_prompt + language_instruction
             
             # Build full prompt with conversation history
             if conversation_context and iteration > 1:
@@ -335,7 +365,7 @@ async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
             
             # Execute tool calls
             print(f"🔧 Executing {len(tool_calls)} tool call(s)...")
-            tool_results = execute_tool_calls(tool_calls)
+            tool_results = await execute_tool_calls(tool_calls)
             
             # Add assistant message with tool calls to conversation
             assistant_msg = OmniChatMessage(

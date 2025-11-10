@@ -1,5 +1,5 @@
 import { Tool } from '../services/apiService';
-import { Wrench, ChevronDown, ChevronUp, Loader2, AlertCircle } from 'lucide-react';
+import { Wrench, ChevronDown, ChevronUp, Loader2, AlertCircle, RefreshCw } from 'lucide-react';
 import { useState } from 'react';
 
 interface AvailableToolsProps {
@@ -8,6 +8,7 @@ interface AvailableToolsProps {
   onToggle?: () => void;
   isLoading?: boolean;
   error?: string | null;
+  onRefresh?: () => void;
 }
 
 export function AvailableTools({ 
@@ -15,7 +16,8 @@ export function AvailableTools({
   isOpen: controlledOpen, 
   onToggle,
   isLoading = false,
-  error = null
+  error = null,
+  onRefresh
 }: AvailableToolsProps) {
   const [internalOpen, setInternalOpen] = useState(true); // Default to open
   const isOpen = controlledOpen !== undefined ? controlledOpen : internalOpen;
@@ -23,22 +25,36 @@ export function AvailableTools({
 
   return (
     <div className="border-t border-dark-border">
-      <button
-        onClick={toggle}
-        className="w-full flex items-center justify-between p-4 hover:bg-dark-surfaceHover transition-colors"
-      >
-        <div className="flex items-center gap-2">
-          <Wrench className="w-4 h-4 text-dark-accent" />
-          <span className="text-sm font-medium text-dark-text">
-            Available Tools {tools.length > 0 && `(${tools.length})`}
-          </span>
-        </div>
-        {isOpen ? (
-          <ChevronUp className="w-4 h-4 text-dark-textSecondary" />
-        ) : (
-          <ChevronDown className="w-4 h-4 text-dark-textSecondary" />
+      <div className="flex items-center">
+        <button
+          onClick={toggle}
+          className="flex-1 flex items-center justify-between p-4 hover:bg-dark-surfaceHover transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <Wrench className="w-4 h-4 text-dark-accent" />
+            <span className="text-sm font-medium text-dark-text">
+              Available Tools {tools.length > 0 && `(${tools.length})`}
+            </span>
+          </div>
+          {isOpen ? (
+            <ChevronUp className="w-4 h-4 text-dark-textSecondary" />
+          ) : (
+            <ChevronDown className="w-4 h-4 text-dark-textSecondary" />
+          )}
+        </button>
+        {onRefresh && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onRefresh();
+            }}
+            className="p-2 hover:bg-dark-surfaceHover transition-colors text-dark-textSecondary hover:text-dark-accent"
+            title="Refresh tools"
+          >
+            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+          </button>
         )}
-      </button>
+      </div>
 
       {isOpen && (
         <div className="px-4 pb-4 space-y-2 max-h-96 overflow-y-auto">

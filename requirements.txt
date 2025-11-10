@@ -23,6 +23,9 @@ pillow
 # Numerical operations
 numpy
 
+# MCP Server support
+aiohttp
+
 # Optional: Flash attention for faster inference (requires CUDA)
 # flash-attn --no-build-isolation
 

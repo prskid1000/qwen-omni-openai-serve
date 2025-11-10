@@ -10,17 +10,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .omni_manager import OmniModelManager
-from .routes import omni_chat
+from .routes import omni_chat, mcp_servers
 from .models import OmniHealthResponse
+from .mcp_client_manager import MCPClientManager
 
-# Global manager
+# Global managers
 omni_manager: Optional[OmniModelManager] = None
+mcp_manager: Optional[MCPClientManager] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle"""
-    global omni_manager
+    global omni_manager, mcp_manager
     
     try:
         print("🚀 Starting Omni Model Server...")
@@ -42,8 +44,17 @@ async def lifespan(app: FastAPI):
         # Set manager in routes
         omni_chat.set_omni_manager(omni_manager)
         
+        # Initialize MCP client manager
+        mcp_manager = MCPClientManager()
+        mcp_servers.set_mcp_manager(mcp_manager)
+        
+        # Update tool service with MCP manager
+        from .tool_service import tool_service
+        tool_service.mcp_manager = mcp_manager
+        
         print(f"✅ Server ready at http://0.0.0.0:8665")
         print(f"📚 Model: {omni_manager.model_name}")
+        print(f"🔌 MCP Server Manager initialized")
         
     except Exception as e:
         print(f"❌ Failed to start server: {e}")
@@ -52,6 +63,10 @@ async def lifespan(app: FastAPI):
     yield
     
     # Cleanup
+    if mcp_manager:
+        print("🔄 Disconnecting MCP servers...")
+        await mcp_manager.disconnect_all_servers()
+    
     if omni_manager:
         print("🔄 Cleaning up...")
         # PyTorch models don't need explicit cleanup, but we can clear references
@@ -78,6 +93,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(omni_chat.router, tags=["Omni Chat"])
+app.include_router(mcp_servers.router, tags=["MCP Servers"])
 
 
 @app.get("/")

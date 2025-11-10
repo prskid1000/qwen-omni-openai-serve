@@ -94,3 +94,87 @@ export const storage = {
   }
 };
 
+// MCP Server Storage
+const MCP_SERVERS_STORAGE_KEY = 'omni_mcp_servers';
+
+export interface MCPServerConfig {
+  id: string;
+  config: {
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    url?: string;
+    prefer_sse?: boolean;
+    timeout?: number;
+    version?: string;
+    [key: string]: any;
+  };
+  lastConnected?: number;
+}
+
+export const mcpStorage = {
+  getServers(): MCPServerConfig[] {
+    try {
+      const data = localStorage.getItem(MCP_SERVERS_STORAGE_KEY);
+      if (!data) return [];
+      return JSON.parse(data);
+    } catch (error) {
+      console.error('Error loading MCP servers from storage:', error);
+      return [];
+    }
+  },
+
+  saveServer(server: MCPServerConfig): void {
+    try {
+      const servers = this.getServers();
+      const index = servers.findIndex(s => s.id === server.id);
+      
+      if (index >= 0) {
+        servers[index] = server;
+      } else {
+        servers.push(server);
+      }
+      
+      localStorage.setItem(MCP_SERVERS_STORAGE_KEY, JSON.stringify(servers));
+    } catch (error) {
+      console.error('Error saving MCP server to storage:', error);
+    }
+  },
+
+  getServer(id: string): MCPServerConfig | null {
+    const servers = this.getServers();
+    return servers.find(s => s.id === id) || null;
+  },
+
+  deleteServer(id: string): void {
+    try {
+      const servers = this.getServers();
+      const filtered = servers.filter(s => s.id !== id);
+      localStorage.setItem(MCP_SERVERS_STORAGE_KEY, JSON.stringify(filtered));
+    } catch (error) {
+      console.error('Error deleting MCP server from storage:', error);
+    }
+  },
+
+  clearAll(): void {
+    try {
+      localStorage.removeItem(MCP_SERVERS_STORAGE_KEY);
+    } catch (error) {
+      console.error('Error clearing MCP servers from storage:', error);
+    }
+  },
+
+  updateLastConnected(id: string): void {
+    try {
+      const servers = this.getServers();
+      const server = servers.find(s => s.id === id);
+      if (server) {
+        server.lastConnected = Date.now();
+        localStorage.setItem(MCP_SERVERS_STORAGE_KEY, JSON.stringify(servers));
+      }
+    } catch (error) {
+      console.error('Error updating last connected time:', error);
+    }
+  }
+};
+
