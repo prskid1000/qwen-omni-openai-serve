@@ -5,7 +5,7 @@ Handles loading and managing Qwen2.5-Omni model
 
 import torch
 from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict, Any
 import sys
 from pathlib import Path
 
@@ -134,7 +134,7 @@ class OmniModelManager:
         
     def generate_response(
         self,
-        text_prompt: str,
+        text_prompt: str = None,
         audio_path: Optional[str] = None,
         image_path: Optional[str] = None,
         video_path: Optional[str] = None,
@@ -143,7 +143,8 @@ class OmniModelManager:
         temperature: float = 0.7,
         top_p: float = 0.9,
         use_audio_in_video: bool = True,
-        do_sample: bool = False
+        do_sample: bool = False,
+        conversation: Optional[List[Dict[str, Any]]] = None
     ) -> Tuple[str, Optional[torch.Tensor]]:
         """
         Generate response from Qwen 2.5 Omni.
@@ -167,42 +168,49 @@ class OmniModelManager:
         if not self.model or not self.processor:
             raise RuntimeError("Model not loaded. Call load_model() first.")
         
-        # Prepare conversation with system prompt
-        # Default system prompt encourages English responses
-        conversation = [
-            {
-                "role": "system",
-                "content": [
-                    {"type": "text", "text": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech. Please respond in English unless the user explicitly asks for another language."}
-                ],
-            },
-            {"role": "user", "content": []}
-        ]
-        
-        # Add multimodal inputs
-        if audio_path:
-            conversation[1]["content"].append({
-                "type": "audio",
-                "audio": audio_path
-            })
-        
-        if image_path:
-            conversation[1]["content"].append({
-                "type": "image",
-                "image": image_path
-            })
-        
-        if video_path:
-            conversation[1]["content"].append({
-                "type": "video",
-                "video": video_path
-            })
-        
-        # Add text prompt
-        conversation[1]["content"].append({
-            "type": "text",
-            "text": text_prompt
-        })
+        # If conversation is provided, use it; otherwise build from parameters
+        if conversation is not None:
+            # Use provided conversation array (should include system message)
+            # Make sure it has the right structure
+            pass
+        else:
+            # Prepare conversation with system prompt
+            # Default system prompt encourages English responses
+            conversation = [
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech. Please respond in English unless the user explicitly asks for another language."}
+                    ],
+                },
+                {"role": "user", "content": []}
+            ]
+            
+            # Add multimodal inputs
+            if audio_path:
+                conversation[1]["content"].append({
+                    "type": "audio",
+                    "audio": audio_path
+                })
+            
+            if image_path:
+                conversation[1]["content"].append({
+                    "type": "image",
+                    "image": image_path
+                })
+            
+            if video_path:
+                conversation[1]["content"].append({
+                    "type": "video",
+                    "video": video_path
+                })
+            
+            # Add text prompt
+            if text_prompt:
+                conversation[1]["content"].append({
+                    "type": "text",
+                    "text": text_prompt
+                })
         
         # Process inputs using process_mm_info if available
         if HAS_OMNI_UTILS:

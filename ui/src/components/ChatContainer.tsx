@@ -287,16 +287,27 @@ export function ChatContainer() {
       }
 
       // Build messages array for tool calling
-      const messages: ChatMessage[] = currentChat?.messages.map(msg => ({
-        role: msg.role,
-        content: msg.content,
-        timestamp: msg.timestamp,
-        audioData: msg.audioData,
-        imageUrl: msg.imageUrl,
-        videoUrl: msg.videoUrl,
-        toolCalls: msg.toolCalls,
-        toolCallId: msg.toolCallId,
-      })) || [];
+      // Include previous chat history, but exclude media outputs from assistant messages
+      const messages: ChatMessage[] = currentChat?.messages.map(msg => {
+        const historyMsg: ChatMessage = {
+          role: msg.role,
+          content: msg.content,
+          timestamp: msg.timestamp,
+          toolCalls: msg.toolCalls,
+          toolCallId: msg.toolCallId,
+        };
+        
+        // For user messages: include all media inputs
+        if (msg.role === 'user') {
+          historyMsg.audioData = msg.audioData; // Voice input
+          historyMsg.imageUrl = msg.imageUrl;
+          historyMsg.videoUrl = msg.videoUrl;
+        }
+        // For assistant messages: exclude media outputs (audioData, imageUrl, videoUrl)
+        // These are outputs, not inputs, so we don't send them in the request
+        
+        return historyMsg;
+      }) || [];
 
       // Add the new user message
       messages.push({
@@ -308,6 +319,7 @@ export function ChatContainer() {
       });
 
       // Send to API
+      // Always include messages (history) for context, not just when tool calling is enabled
       const response = await apiService.sendMessage(
         text || 'Describe the uploaded media.',
         audioFile,
@@ -316,7 +328,7 @@ export function ChatContainer() {
         {
           returnAudio: audioOutputEnabled,
           tools: toolCallingEnabled && availableTools.length > 0 ? availableTools : undefined,
-          messages: toolCallingEnabled ? messages : undefined,
+          messages: messages.length > 0 ? messages : undefined, // Always send history if available
         }
       );
 
@@ -326,42 +338,34 @@ export function ChatContainer() {
         throw new Error('No response from server');
       }
 
-      // If conversation_messages are provided, add all of them (includes tool calls, tool results, and final response)
+      // Only add the NEW assistant response, not all conversation history
+      // The conversation_messages field is only for tool calls/results, not for normal chat
+      const audioData = assistantMessage.audio?.data;
+      const assistantMsg: ChatMessage = {
+        role: 'assistant' as const,
+        content: assistantMessage.content,
+        audioData: audioData,
+        timestamp: Date.now(),
+        toolCalls: assistantMessage.tool_calls,
+      };
+      addMessage(chatId, assistantMsg);
+      
+      // If conversation_messages are provided and contain tool-related messages, add those too
+      // But only if they're not already in the chat (to avoid duplicates)
       if (response.conversation_messages && response.conversation_messages.length > 0) {
-        // Skip the first message (user message) as we already added it
-        // Add all conversation messages (tool calls, tool results, final response)
         for (const msg of response.conversation_messages) {
-          // Skip user messages as they're already in the chat
-          if (msg.role === 'user') {
-            continue;
+          // Only add tool messages and assistant messages with tool calls that aren't the final response
+          if (msg.role === 'tool' || (msg.role === 'assistant' && msg.tool_calls && msg.content !== assistantMessage.content)) {
+            const conversationMsg: ChatMessage = {
+              role: msg.role as 'assistant' | 'tool',
+              content: msg.content,
+              timestamp: Date.now(),
+              toolCalls: msg.tool_calls,
+              toolCallId: msg.tool_call_id,
+            };
+            addMessage(chatId, conversationMsg);
           }
-          
-          const conversationMsg: ChatMessage = {
-            role: msg.role as 'assistant' | 'tool',
-            content: msg.content,
-            timestamp: Date.now(),
-            toolCalls: msg.tool_calls,
-            toolCallId: msg.tool_call_id,
-          };
-          
-          // Add audio data if this is the final assistant message
-          if (msg.role === 'assistant' && assistantMessage.audio?.data) {
-            conversationMsg.audioData = assistantMessage.audio.data;
-          }
-          
-          addMessage(chatId, conversationMsg);
         }
-      } else {
-        // Fallback: just add the assistant message (backward compatibility)
-        const audioData = assistantMessage.audio?.data;
-        const assistantMsg: ChatMessage = {
-          role: 'assistant' as const,
-          content: assistantMessage.content,
-          audioData: audioData,
-          timestamp: Date.now(),
-          toolCalls: assistantMessage.tool_calls,
-        };
-        addMessage(chatId, assistantMsg);
       }
     } catch (error: any) {
       // Check if it's a connection error and update server status

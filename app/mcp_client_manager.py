@@ -379,52 +379,63 @@ class MCPClientManager:
         }
         
         try:
-            if state.process and state.process.stdin:
-                request_str = json.dumps(initialize_request) + "\n"
-                # Encode to bytes if needed
-                if isinstance(request_str, str):
-                    request_bytes = request_str.encode('utf-8')
-                else:
-                    request_bytes = request_str
+            # Check if process exists and has required streams
+            if not state.process:
+                raise Exception("Process not created - cannot initialize")
+            
+            if not state.process.stdin:
+                raise Exception("Process stdin not available")
+            
+            if not state.process.stdout:
+                raise Exception("Process stdout not available")
+            
+            # Initialize read lock if not already initialized
+            if state._read_lock is None:
+                state._read_lock = asyncio.Lock()
+            
+            request_str = json.dumps(initialize_request) + "\n"
+            # Encode to bytes if needed
+            if isinstance(request_str, str):
+                request_bytes = request_str.encode('utf-8')
+            else:
+                request_bytes = request_str
+            
+            state.process.stdin.write(request_bytes)
+            await state.process.stdin.drain()
+            
+            # Read initialize response
+            # Some MCP servers output non-JSON text first (like status messages)
+            # We need to skip non-JSON lines and read until we get valid JSON
+            # Use lock to prevent concurrent reads
+            async with state._read_lock:
+                response = await self._read_jsonrpc_response(
+                    state.process.stdout,
+                    timeout=5.0,
+                    operation="initialization"
+                )
                 
-                state.process.stdin.write(request_bytes)
-                await state.process.stdin.drain()
+                if not response:
+                    raise Exception("Could not find valid JSON-RPC response from MCP server after reading multiple lines")
                 
-                # Read initialize response
-                # Some MCP servers output non-JSON text first (like status messages)
-                # We need to skip non-JSON lines and read until we get valid JSON
-                # Use lock to prevent concurrent reads
-                if state.process.stdout:
-                    async with state._read_lock:
-                        response = await self._read_jsonrpc_response(
-                            state.process.stdout,
-                            timeout=5.0,
-                            operation="initialization"
-                        )
-                    
-                    if not response:
-                        raise Exception("Could not find valid JSON-RPC response from MCP server after reading multiple lines")
-                    
-                    # Process the JSON-RPC response
-                    if "result" in response:
-                        logger.info(f"Initialized MCP server: {server_id}")
-                        # Send initialized notification
-                        initialized_notification = {
-                            "jsonrpc": "2.0",
-                            "method": "notifications/initialized"
-                        }
-                        notif_str = json.dumps(initialized_notification) + "\n"
-                        notif_bytes = notif_str.encode('utf-8') if isinstance(notif_str, str) else notif_str
-                        state.process.stdin.write(notif_bytes)
-                        await state.process.stdin.drain()
-                    elif "error" in response:
-                        error_info = response.get("error", {})
-                        error_msg = error_info.get("message", str(error_info))
-                        raise Exception(f"MCP server initialization error: {error_msg}")
-                    else:
-                        raise Exception(f"Unexpected response format from server: {response}")
+                # Process the JSON-RPC response
+                if "result" in response:
+                    logger.info(f"Initialized MCP server: {server_id}")
+                    # Send initialized notification
+                    initialized_notification = {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/initialized"
+                    }
+                    notif_str = json.dumps(initialized_notification) + "\n"
+                    notif_bytes = notif_str.encode('utf-8') if isinstance(notif_str, str) else notif_str
+                    state.process.stdin.write(notif_bytes)
+                    await state.process.stdin.drain()
+                elif "error" in response:
+                    error_info = response.get("error", {})
+                    error_msg = error_info.get("message", str(error_info))
+                    raise Exception(f"MCP server initialization error: {error_msg}")
                 else:
-                    raise Exception("Process stdout not available")
+                    raise Exception(f"Unexpected response format from server: {response}")
+                    
         except asyncio.TimeoutError:
             raise Exception("Timeout waiting for initialization response from MCP server")
         except Exception as e:

@@ -14,6 +14,10 @@ class OmniChatMessage(BaseModel):
     audio_path: Optional[str] = None
     image_path: Optional[str] = None
     video_path: Optional[str] = None
+    # Base64 media data (alternative to paths, for UI history)
+    audio_data: Optional[str] = None  # base64 encoded audio data
+    image_data: Optional[str] = None  # base64 encoded image data (data URL format)
+    video_data: Optional[str] = None  # base64 encoded video data (data URL format)
     # Tool calling support (OpenAI-compatible)
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None  # For tool result messages

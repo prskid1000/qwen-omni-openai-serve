@@ -102,8 +102,9 @@ class ApiService {
       messages?: ChatMessage[];
     }
   ): Promise<ChatResponse> {
-    // If tools are provided, use the JSON API endpoint
-    if (options?.tools && options.tools.length > 0) {
+    // If tools are provided OR if messages (history) are provided, use the JSON API endpoint
+    // This allows us to send chat history even when tool calling is disabled
+    if ((options?.tools && options.tools.length > 0) || (options?.messages && options.messages.length > 0)) {
       return this.sendMessageWithTools(text, audioFile, imageFile, videoFile, options);
     }
 
@@ -170,22 +171,105 @@ class ApiService {
       messages?: ChatMessage[];
     }
   ): Promise<ChatResponse> {
-    // Convert files to base64 if needed
-    let audioPath: string | undefined;
-    let imagePath: string | undefined;
-    let videoPath: string | undefined;
+    // Helper function to convert data URL to base64 string
+    const dataUrlToBase64 = (dataUrl: string): string => {
+      if (dataUrl.startsWith('data:')) {
+        // Extract base64 part after comma
+        return dataUrl.split(',')[1];
+      }
+      return dataUrl; // Already base64
+    };
 
-    // For tool calling, we'll need to handle file uploads differently
-    // For now, we'll use the JSON endpoint which expects file paths
-    // In a real implementation, you'd upload files first and get paths
+    // Helper function to convert File to base64
+    const fileToBase64 = (file: File): Promise<string> => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result as string;
+          // Extract base64 from data URL
+          if (result.startsWith('data:')) {
+            resolve(dataUrlToBase64(result));
+          } else {
+            resolve(result);
+          }
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    };
 
-    const messages: any[] = options?.messages || [{
+    // Build messages array from history
+    const messages: any[] = [];
+    
+    // Process history messages (excluding the current one)
+    if (options?.messages && options.messages.length > 0) {
+      for (const msg of options.messages) {
+        const apiMsg: any = {
+          role: msg.role,
+          content: msg.content || '',
+        };
+
+        // For user messages: include media inputs (imageUrl, videoUrl, audioData)
+        if (msg.role === 'user') {
+          if (msg.imageUrl) {
+            apiMsg.image_data = msg.imageUrl; // Send as data URL, backend will convert
+          }
+          if (msg.videoUrl) {
+            apiMsg.video_data = msg.videoUrl; // Send as data URL, backend will convert
+          }
+          // Include audioData for user messages (voice input)
+          if (msg.audioData) {
+            // Convert audioData to proper format (might be base64 or data URL)
+            if (msg.audioData.startsWith('data:')) {
+              apiMsg.audio_data = msg.audioData;
+            } else {
+              // Assume it's base64, wrap in data URL
+              apiMsg.audio_data = `data:audio/wav;base64,${msg.audioData}`;
+            }
+          }
+        }
+        
+        // For assistant messages: exclude media outputs (audioData, imageUrl, videoUrl)
+        // These are outputs, not inputs, so we don't send them
+        // Only include text content and tool calls
+        
+        // Include tool calls and tool call IDs
+        if (msg.toolCalls) {
+          apiMsg.tool_calls = msg.toolCalls;
+        }
+        if (msg.toolCallId) {
+          apiMsg.tool_call_id = msg.toolCallId;
+        }
+
+        messages.push(apiMsg);
+      }
+    }
+
+    // Add the current message with media
+    const currentMessage: any = {
       role: 'user',
-      content: text,
-      audio_path: audioPath,
-      image_path: imagePath,
-      video_path: videoPath,
-    }];
+      content: text || '',
+    };
+
+    // Convert current message's media files to base64
+    if (audioFile) {
+      const audioBase64 = await fileToBase64(audioFile);
+      currentMessage.audio_data = `data:audio/wav;base64,${audioBase64}`;
+    }
+    if (imageFile) {
+      const imageBase64 = await fileToBase64(imageFile);
+      // Detect MIME type from file
+      const mimeType = imageFile.type || 'image/png';
+      currentMessage.image_data = `data:${mimeType};base64,${imageBase64}`;
+    }
+    if (videoFile) {
+      const videoBase64 = await fileToBase64(videoFile);
+      // Detect MIME type from file
+      const mimeType = videoFile.type || 'video/mp4';
+      currentMessage.video_data = `data:${mimeType};base64,${videoBase64}`;
+    }
+
+    messages.push(currentMessage);
 
     const requestBody = {
       messages,

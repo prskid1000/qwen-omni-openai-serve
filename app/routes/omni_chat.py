@@ -31,6 +31,33 @@ def set_omni_manager(manager):
     omni_manager = manager
 
 
+async def convert_base64_to_temp_file(base64_data: str, suffix: str = ".tmp") -> Optional[str]:
+    """Convert base64 data (or data URL) to a temporary file and return the path"""
+    if not base64_data:
+        return None
+    
+    try:
+        # Handle data URL format (data:image/png;base64,...)
+        if base64_data.startswith("data:"):
+            # Extract the base64 part after the comma
+            base64_part = base64_data.split(",", 1)[1]
+        else:
+            base64_part = base64_data
+        
+        # Decode base64
+        file_bytes = base64.b64decode(base64_part)
+        
+        # Create temporary file
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        temp_file.write(file_bytes)
+        temp_file.close()
+        
+        return temp_file.name
+    except Exception as e:
+        print(f"⚠️  Failed to convert base64 to temp file: {e}")
+        return None
+
+
 @router.get("/v1/omni/tools")
 async def get_available_tools():
     """Get list of available tools (includes built-in and MCP tools)"""
@@ -179,7 +206,47 @@ async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
     max_iterations = 5  # Limit tool calling iterations
     iteration = 0
     
+    # Track temporary files for cleanup
+    temp_files_to_cleanup = []
+    
     try:
+        # Process all messages: convert base64 media to temp files for user messages
+        # Ignore media outputs (audio_data) from assistant messages
+        for msg in conversation_messages:
+            if msg.role == "user":
+                # Convert base64 media data to temp files for user messages
+                if msg.audio_data and not msg.audio_path:
+                    temp_path = await convert_base64_to_temp_file(msg.audio_data, suffix=".wav")
+                    if temp_path:
+                        msg.audio_path = temp_path
+                        temp_files_to_cleanup.append(temp_path)
+                
+                if msg.image_data and not msg.image_path:
+                    # Try to detect image format from data URL
+                    suffix = ".png"
+                    if msg.image_data.startswith("data:image/"):
+                        mime_type = msg.image_data.split(";")[0].split("/")[1]
+                        suffix = f".{mime_type}" if mime_type in ["png", "jpg", "jpeg", "gif", "webp"] else ".png"
+                    temp_path = await convert_base64_to_temp_file(msg.image_data, suffix=suffix)
+                    if temp_path:
+                        msg.image_path = temp_path
+                        temp_files_to_cleanup.append(temp_path)
+                
+                if msg.video_data and not msg.video_path:
+                    # Try to detect video format from data URL
+                    suffix = ".mp4"
+                    if msg.video_data.startswith("data:video/"):
+                        mime_type = msg.video_data.split(";")[0].split("/")[1]
+                        suffix = f".{mime_type}" if mime_type in ["mp4", "webm", "ogg"] else ".mp4"
+                    temp_path = await convert_base64_to_temp_file(msg.video_data, suffix=suffix)
+                    if temp_path:
+                        msg.video_path = temp_path
+                        temp_files_to_cleanup.append(temp_path)
+            elif msg.role == "assistant":
+                # Ignore media outputs from assistant messages (audio_data, image_data, video_data)
+                # These are outputs, not inputs, so we don't process them
+                pass
+        
         # Reload model if switching between audio/text modes
         omni_manager.reload_model_if_needed(wants_audio)
         
@@ -227,40 +294,83 @@ async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
             # Get the last message for processing
             last_message = conversation_messages[-1]
             
-            # Build full conversation context for the model
-            # Include all previous messages in the conversation
-            conversation_context = ""
-            for msg in conversation_messages:
-                if msg.role == "user":
-                    conversation_context += f"User: {msg.content or ''}\n\n"
-                elif msg.role == "assistant":
-                    conversation_context += f"Assistant: {msg.content or ''}\n\n"
-                elif msg.role == "tool":
-                    conversation_context += f"Tool Result ({msg.tool_call_id}): {msg.content or ''}\n\n"
+            # Build proper conversation array with all messages and their media
+            # This is the format expected by the model's apply_chat_template
+            conversation_array = [
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech. Please respond in English unless the user explicitly asks for another language."}
+                    ]
+                }
+            ]
             
-            # Add the current message
-            text_prompt = last_message.content or ""
-            
-            # Add language instruction and tool information on first iteration
+            # Add language instruction and tool information to system message on first iteration
             if iteration == 1:
                 if tool_prompt:
-                    text_prompt = text_prompt + tool_prompt
+                    conversation_array[0]["content"][0]["text"] += tool_prompt
                 elif language_instruction:
-                    # Add language instruction even if no tools
-                    text_prompt = text_prompt + language_instruction
+                    conversation_array[0]["content"][0]["text"] += f"\n\n{language_instruction}"
             
-            # Build full prompt with conversation history
-            if conversation_context and iteration > 1:
-                full_prompt = conversation_context + f"User: {text_prompt}\n\nAssistant:"
-            else:
-                full_prompt = text_prompt
+            # Process all messages and build conversation array
+            for msg in conversation_messages:
+                if msg.role == "user":
+                    # Build user message with all media inputs
+                    user_content = []
+                    
+                    # Add media inputs (ignore media outputs)
+                    if msg.audio_path:
+                        user_content.append({
+                            "type": "audio",
+                            "audio": msg.audio_path
+                        })
+                    if msg.image_path:
+                        user_content.append({
+                            "type": "image",
+                            "image": msg.image_path
+                        })
+                    if msg.video_path:
+                        user_content.append({
+                            "type": "video",
+                            "video": msg.video_path
+                        })
+                    
+                    # Add text content (even if empty, to maintain conversation structure)
+                    user_content.append({
+                        "type": "text",
+                        "text": msg.content or ""
+                    })
+                    
+                    # Always add user message to maintain conversation flow
+                    conversation_array.append({
+                        "role": "user",
+                        "content": user_content
+                    })
+                
+                elif msg.role == "assistant":
+                    # Add assistant message (text only, no media outputs)
+                    if msg.content:
+                        conversation_array.append({
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": msg.content}
+                            ]
+                        })
+                
+                elif msg.role == "tool":
+                    # Tool results are included in the conversation context as text
+                    # Format: "Tool Result (tool_call_id): content"
+                    if msg.content:
+                        conversation_array.append({
+                            "role": "user",  # Tool results are treated as user input
+                            "content": [
+                                {"type": "text", "text": f"Tool Result ({msg.tool_call_id}): {msg.content}"}
+                            ]
+                        })
             
-            # Generate response
+            # Generate response using the full conversation array
             response_text, audio_tensor = omni_manager.generate_response(
-                text_prompt=full_prompt,
-                audio_path=last_message.audio_path,
-                image_path=last_message.image_path,
-                video_path=last_message.video_path,
+                conversation=conversation_array,
                 max_new_tokens=request.max_tokens,
                 return_audio=wants_audio,
                 temperature=request.temperature,
@@ -301,27 +411,35 @@ async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
                     except Exception as e:
                         print(f"⚠️  Failed to encode audio: {e}")
                 
-                # Build conversation messages for UI (include all steps)
-                conversation_for_ui = []
-                for msg in conversation_messages:
-                    msg_dict = {
-                        "role": msg.role,
-                        "content": msg.content,
-                    }
-                    if msg.tool_calls:
-                        msg_dict["tool_calls"] = msg.tool_calls
-                    if msg.tool_call_id:
-                        msg_dict["tool_call_id"] = msg.tool_call_id
-                    conversation_for_ui.append(msg_dict)
+                # Build conversation messages for UI - only include tool-related messages if present
+                # For normal responses, we don't need to send all history back to UI
+                # The UI already has the history, we just need to send the NEW response
+                conversation_for_ui = None  # Only set if we have tool calls/results
                 
-                # Add the final assistant response
-                final_msg_dict = {
-                    "role": "assistant",
-                    "content": cleaned_text
-                }
-                if tool_calls:
-                    final_msg_dict["tool_calls"] = tool_calls
-                conversation_for_ui.append(final_msg_dict)
+                # Only include conversation_messages if there were tool calls (for debugging/tool flow)
+                if tool_calls or any(msg.role == "tool" for msg in conversation_messages):
+                    conversation_for_ui = []
+                    # Only include tool-related messages, not all history
+                    for msg in conversation_messages:
+                        if msg.role in ["tool"] or (msg.role == "assistant" and msg.tool_calls):
+                            msg_dict = {
+                                "role": msg.role,
+                                "content": msg.content,
+                            }
+                            if msg.tool_calls:
+                                msg_dict["tool_calls"] = msg.tool_calls
+                            if msg.tool_call_id:
+                                msg_dict["tool_call_id"] = msg.tool_call_id
+                            conversation_for_ui.append(msg_dict)
+                    
+                    # Add the final assistant response
+                    final_msg_dict = {
+                        "role": "assistant",
+                        "content": cleaned_text
+                    }
+                    if tool_calls:
+                        final_msg_dict["tool_calls"] = tool_calls
+                    conversation_for_ui.append(final_msg_dict)
                 
                 # Estimate tokens
                 prompt_tokens = sum(len(msg.content.split()) if msg.content else 0 for msg in conversation_messages)
@@ -403,24 +521,8 @@ async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
             if not cleaned_text:
                 cleaned_text = final_response
             
-            # Build conversation messages for UI
-            conversation_for_ui = []
-            for msg in conversation_messages:
-                msg_dict = {
-                    "role": msg.role,
-                    "content": msg.content,
-                }
-                if msg.tool_calls:
-                    msg_dict["tool_calls"] = msg.tool_calls
-                if msg.tool_call_id:
-                    msg_dict["tool_call_id"] = msg.tool_call_id
-                conversation_for_ui.append(msg_dict)
-            
-            # Add final response
-            conversation_for_ui.append({
-                "role": "assistant",
-                "content": cleaned_text
-            })
+            # Build conversation messages for UI - only include tool-related messages if present
+            conversation_for_ui = None  # Only set if we have tool calls/results
             
             # Encode audio if present
             audio_base64 = None
@@ -467,6 +569,15 @@ async def omni_chat_completions(request: OmniChatRequest) -> OmniChatResponse:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+    finally:
+        # Cleanup temporary files created from base64 data
+        import os
+        for temp_file in temp_files_to_cleanup:
+            try:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+            except Exception as e:
+                print(f"⚠️  Failed to cleanup temp file {temp_file}: {e}")
 
 
 @router.post("/v1/omni/chat/completions/upload")
